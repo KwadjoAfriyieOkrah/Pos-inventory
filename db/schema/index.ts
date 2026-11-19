@@ -1,6 +1,7 @@
 export * from "./audit-events";
 export * from "./branches";
 export * from "./organizations";
+export * from "./login-failures";
 export * from "./role-permissions";
 export * from "./roles";
 export * from "./terminal-registration-codes";

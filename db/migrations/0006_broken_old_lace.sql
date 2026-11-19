@@ -1,0 +1,2 @@
+ALTER TABLE "login_failures" ADD COLUMN "status" text DEFAULT 'failed' NOT NULL;--> statement-breakpoint
+ALTER TABLE "login_failures" ADD CONSTRAINT "login_failures_status_check" CHECK ("login_failures"."status" in ('pending', 'failed', 'succeeded'));

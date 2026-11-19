@@ -9,26 +9,29 @@ import { auditEvents, branches, organizations, terminals, users } from "../../db
 loadDotenv({ path: ".env.local", quiet: true });
 
 type DbClient = typeof import("../../src/server/db/client")["db"];
-type Tx = Parameters<Parameters<DbClient["transaction"]>[0]>[0];
 type Login = typeof import("../../src/server/auth/login")["login"];
 type LoginAction = typeof import("../../src/app/(auth)/login/actions")["loginAction"];
 type GenerateTerminalToken = typeof import("../../src/server/auth/terminal")["generateTerminalToken"];
 type HashTerminalToken = typeof import("../../src/server/auth/terminal")["hashTerminalToken"];
 
+function reasonOf(result: Awaited<ReturnType<Login>>): string | undefined {
+  return "reason" in result ? result.reason : undefined;
+}
+
 const TEST_PASSWORD = "correct horse battery staple";
 const WRONG_PASSWORD = "wrong horse battery staple";
-const ROLLBACK = Symbol("rollback");
 const ERROR_MESSAGE = "Email or password is incorrect";
 const UNREGISTERED_TERMINAL_MESSAGE =
   "This device is not registered. Contact the pharmacy owner.";
 
 const harness = vi.hoisted(() => ({
-  activeDb: undefined as unknown,
   insertFailure: undefined as "succeeded" | "failed" | undefined,
   selectError: undefined as unknown,
   selectErrorOnCall: undefined as number | undefined,
   selectCalls: 0,
   cookieToken: undefined as string | undefined,
+  lastErrorStage: "none" as string,
+  lastErrorInfo: "none" as string,
 }));
 
 vi.mock("server-only", () => ({}));
@@ -48,42 +51,82 @@ vi.mock("@/lib/env", async () => {
   return { env: real.env };
 });
 
-vi.mock("@/server/db/client", () => ({
-  get db() {
-    const active = harness.activeDb as
-      | {
-          select: (...args: unknown[]) => unknown;
-          insert: (...args: unknown[]) => unknown;
-          transaction: (run: (tx: unknown) => Promise<unknown>) => Promise<unknown>;
-        }
-      | undefined;
+vi.mock("@/server/db/client", async () => await import("../../src/server/db/client"));
 
-    if (!active) throw new Error("no active test transaction");
+vi.mock("../../src/server/auth/login-db", async () => {
+  const actual = await vi.importActual<typeof import("../../src/server/auth/login-db")>(
+    "../../src/server/auth/login-db",
+  );
 
-    return {
-      select: (...args: unknown[]) => {
-        harness.selectCalls += 1;
-        if (harness.selectError && harness.selectCalls === harness.selectErrorOnCall) {
-          throw harness.selectError;
-        }
-        return (active.select as (...a: unknown[]) => unknown)(...args);
-      },
-      insert: (...args: unknown[]) => {
-        if (harness.insertFailure === "failed") {
-          throw new Error("simulated auth.login_failed insert failure");
-        }
-        return (active.insert as (...a: unknown[]) => unknown)(...args);
-      },
-      transaction: async (run: (tx: unknown) => Promise<unknown>) => {
-        if (harness.insertFailure === "succeeded") {
-          throw new Error("simulated auth.login_succeeded insert failure");
-        }
-        return run(active);
-      },
+  type WrappedClient = {
+    select: (...args: unknown[]) => unknown;
+    insert: (...args: unknown[]) => unknown;
+    execute: (...args: unknown[]) => unknown;
+  };
+
+  const wrapSelect = (client: WrappedClient) =>
+    (...args: unknown[]) => {
+      harness.selectCalls += 1;
+      if (harness.selectError && harness.selectCalls === harness.selectErrorOnCall) {
+        throw harness.selectError;
+      }
+      try {
+        return client.select.call(client, ...args);
+      } catch (error) {
+        harness.lastErrorStage = "select";
+        throw error;
+      }
     };
-  },
-  pool: undefined,
-}));
+
+  const wrapInsert = (client: WrappedClient) =>
+    (...args: unknown[]) => {
+      if (harness.insertFailure === "succeeded") {
+        throw new Error("simulated auth.login_succeeded insert failure");
+      }
+      if (harness.insertFailure === "failed") {
+        throw new Error("simulated auth.login_failed insert failure");
+      }
+      try {
+        return client.insert.call(client, ...args);
+      } catch (error) {
+        harness.lastErrorStage = "insert";
+        throw error;
+      }
+    };
+
+  const wrapClient = (client: WrappedClient): WrappedClient => ({
+    select: wrapSelect(client),
+    insert: wrapInsert(client),
+    execute: (...args: unknown[]) => {
+      try {
+        return client.execute.call(client, ...args);
+      } catch (error) {
+        harness.lastErrorStage = "execute";
+        throw error;
+      }
+    },
+  });
+
+  return {
+    ...actual,
+    authDb: {
+      select: wrapSelect(actual.authDb as unknown as WrappedClient),
+      insert: wrapInsert(actual.authDb as unknown as WrappedClient),
+      execute: (...args: unknown[]) =>
+        (actual.authDb.execute as unknown as (...a: unknown[]) => unknown).call(actual.authDb, ...args),
+      transaction: async (run: (client: WrappedClient) => Promise<unknown>) => {
+        try {
+          return await actual.authDb.transaction(async (client) =>
+            run(wrapClient(client as unknown as WrappedClient)),
+          );
+        } catch (error) {
+          harness.lastErrorStage = `transaction:${harness.lastErrorStage}`;
+          throw error;
+        }
+      },
+    } as unknown as typeof actual.authDb,
+  };
+});
 
 vi.mock("next-auth", () => {
   class AuthError extends Error {
@@ -109,6 +152,7 @@ vi.mock("@/server/auth", async () => {
 
 let db: DbClient;
 let pool: typeof import("../../src/server/db/client")["pool"];
+let authPool: typeof import("../../src/server/auth/login-db")["authPool"];
 let hashPassword: (plain: string) => Promise<string>;
 let login: Login;
 let loginAction: LoginAction;
@@ -119,6 +163,7 @@ beforeAll(async () => {
   const client = await import("../../src/server/db/client");
   db = client.db;
   pool = client.pool;
+  ({ authPool } = await import("../../src/server/auth/login-db"));
   ({ hashPassword } = await import("../../src/server/auth/password"));
   ({ login } = await import("../../src/server/auth/login"));
   ({ loginAction } = await import("../../src/app/(auth)/login/actions"));
@@ -134,25 +179,14 @@ afterEach(() => {
 
 afterAll(async () => {
   if (pool) await pool.end();
+  if (authPool) await authPool.end();
 });
 
-async function withLoginTransaction(run: (tx: Tx) => Promise<void>): Promise<void> {
-  try {
-    await db.transaction(async (tx) => {
-      harness.activeDb = tx;
-      try {
-        await run(tx);
-      } finally {
-        harness.activeDb = undefined;
-      }
-      throw ROLLBACK;
-    });
-  } catch (error) {
-    if (error !== ROLLBACK) throw error;
-  }
+async function withCommittedFixtures(run: (tx: DbClient) => Promise<void>): Promise<void> {
+  await run(db);
 }
 
-async function insertOrganization(tx: Tx): Promise<string> {
+async function insertOrganization(tx: DbClient): Promise<string> {
   const [row] = await tx
     .insert(organizations)
     .values({ name: `login-org-${randomUUID()}` })
@@ -160,7 +194,7 @@ async function insertOrganization(tx: Tx): Promise<string> {
   return row.id;
 }
 
-async function insertBranch(tx: Tx, organizationId: string): Promise<string> {
+async function insertBranch(tx: DbClient, organizationId: string): Promise<string> {
   const [branch] = await tx
     .insert(branches)
     .values({
@@ -175,7 +209,7 @@ async function insertBranch(tx: Tx, organizationId: string): Promise<string> {
 }
 
 async function insertTerminal(
-  tx: Tx,
+  tx: DbClient,
   organizationId: string,
   branchId: string,
   token: string,
@@ -193,7 +227,7 @@ async function insertTerminal(
 }
 
 async function insertUser(
-  tx: Tx,
+  tx: DbClient,
   organizationId: string,
   isActive: boolean,
 ): Promise<{ id: string; email: string }> {
@@ -211,7 +245,7 @@ async function insertUser(
   return { id: row.id, email: row.email };
 }
 
-async function storedPasswordHash(tx: Tx, userId: string): Promise<string | null> {
+async function storedPasswordHash(tx: DbClient, userId: string): Promise<string | null> {
   const [row] = await tx
     .select({ passwordHash: users.passwordHash })
     .from(users)
@@ -220,7 +254,7 @@ async function storedPasswordHash(tx: Tx, userId: string): Promise<string | null
 }
 
 async function auditRows(
-  tx: Tx,
+  tx: DbClient,
   action: string,
   actorUserId: string,
 ) {
@@ -281,7 +315,7 @@ function consoleCallArguments(source: string): string[] {
 
 describe("login", () => {
   it("unknown email returns ok:false and writes one unknown_email audit row", async () => {
-    await withLoginTransaction(async (tx) => {
+    await withCommittedFixtures(async (tx) => {
       const organizationId = await insertOrganization(tx);
       const branchId = await insertBranch(tx, organizationId);
       const token = generateTerminalToken();
@@ -290,11 +324,16 @@ describe("login", () => {
       const email = `nobody-${randomUUID()}@example.com`;
       const result = await login({ email, password: WRONG_PASSWORD });
 
-      expect(result).toEqual({ ok: false });
+      expect(reasonOf(result)).toBe("bad_credentials");
       const rows = await tx
         .select()
         .from(auditEvents)
-        .where(eq(auditEvents.action, "auth.login_failed"));
+        .where(
+          and(
+            eq(auditEvents.action, "auth.login_failed"),
+            eq(auditEvents.organizationId, organizationId),
+          ),
+        );
       expect(rows).toHaveLength(1);
       expect(rows[0].organizationId).toBe(organizationId);
       expect(rows[0].branchId).toBe(branchId);
@@ -305,7 +344,7 @@ describe("login", () => {
   });
 
   it("login without the pos_terminal cookie is refused and writes no audit row", async () => {
-    await withLoginTransaction(async (tx) => {
+    await withCommittedFixtures(async (tx) => {
       harness.cookieToken = undefined;
       const organizationId = await insertOrganization(tx);
 
@@ -324,7 +363,7 @@ describe("login", () => {
   });
 
   it("wrong password writes one bad_password audit row without credentials", async () => {
-    await withLoginTransaction(async (tx) => {
+    await withCommittedFixtures(async (tx) => {
       const organizationId = await insertOrganization(tx);
       const token = generateTerminalToken();
       harness.cookieToken = token;
@@ -333,7 +372,7 @@ describe("login", () => {
 
       const result = await login({ email: user.email, password: WRONG_PASSWORD });
 
-      expect(result).toEqual({ ok: false });
+      expect(reasonOf(result)).toBe("bad_credentials");
       const rows = await auditRows(tx, "auth.login_failed", user.id);
       expect(rows).toHaveLength(1);
       expect(rows[0].payload).toEqual({ reason: "bad_password" });
@@ -346,7 +385,7 @@ describe("login", () => {
   });
 
   it("inactive user writes one inactive audit row", async () => {
-    await withLoginTransaction(async (tx) => {
+    await withCommittedFixtures(async (tx) => {
       const organizationId = await insertOrganization(tx);
       const token = generateTerminalToken();
       harness.cookieToken = token;
@@ -355,7 +394,7 @@ describe("login", () => {
 
       const result = await login({ email: user.email, password: TEST_PASSWORD });
 
-      expect(result).toEqual({ ok: false });
+      expect(reasonOf(result)).toBe("bad_credentials");
       const rows = await auditRows(tx, "auth.login_failed", user.id);
       expect(rows).toHaveLength(1);
       expect(rows[0].payload).toEqual({ reason: "inactive" });
@@ -363,7 +402,7 @@ describe("login", () => {
   });
 
   it("correct password for active user writes one login_succeeded audit row", async () => {
-    await withLoginTransaction(async (tx) => {
+    await withCommittedFixtures(async (tx) => {
       const organizationId = await insertOrganization(tx);
       const token = generateTerminalToken();
       harness.cookieToken = token;
@@ -372,7 +411,7 @@ describe("login", () => {
 
       const result = await login({ email: user.email, password: TEST_PASSWORD });
 
-      expect(result.ok).toBe(true);
+      expect(result.ok, `reason=${reasonOf(result) ?? "none"} stage=${harness.lastErrorStage}`).toBe(true);
       if (result.ok) {
         expect(result.user.id).toBe(user.id);
         expect(result.user.email).toBe(user.email);
@@ -384,7 +423,7 @@ describe("login", () => {
   });
 
   it("failed login_succeeded audit insert returns ok:false and commits no login row", async () => {
-    await withLoginTransaction(async (tx) => {
+    await withCommittedFixtures(async (tx) => {
       const organizationId = await insertOrganization(tx);
       const token = generateTerminalToken();
       harness.cookieToken = token;
@@ -399,7 +438,7 @@ describe("login", () => {
         harness.insertFailure = undefined;
       }
 
-      expect(result).toEqual({ ok: false });
+      expect(reasonOf(result)).toBe("unavailable");
       const rows = await tx
         .select()
         .from(auditEvents)
@@ -409,7 +448,7 @@ describe("login", () => {
   });
 
   it("failed login_failed audit insert still returns ok:false and creates no session", async () => {
-    await withLoginTransaction(async (tx) => {
+    await withCommittedFixtures(async (tx) => {
       const organizationId = await insertOrganization(tx);
       const token = generateTerminalToken();
       harness.cookieToken = token;
@@ -424,7 +463,7 @@ describe("login", () => {
         harness.insertFailure = undefined;
       }
 
-      expect(result).toEqual({ ok: false });
+      expect(reasonOf(result)).toBe("unavailable");
       expect("user" in result).toBe(false);
       const rows = await tx
         .select()
@@ -435,7 +474,7 @@ describe("login", () => {
   });
 
   it("reports unknown-email and wrong-password timings without failing on them", async () => {
-    await withLoginTransaction(async (tx) => {
+    await withCommittedFixtures(async (tx) => {
       const organizationId = await insertOrganization(tx);
       const token = generateTerminalToken();
       harness.cookieToken = token;
@@ -460,7 +499,7 @@ describe("login", () => {
   });
 
   it("shows exactly one error message for every failure path", async () => {
-    await withLoginTransaction(async (tx) => {
+    await withCommittedFixtures(async (tx) => {
       const organizationId = await insertOrganization(tx);
       const token = generateTerminalToken();
       harness.cookieToken = token;
@@ -510,7 +549,7 @@ describe("login", () => {
   });
 
   it("re-review: wrong password on active user records bad_password", async () => {
-    await withLoginTransaction(async (tx) => {
+    await withCommittedFixtures(async (tx) => {
       const organizationId = await insertOrganization(tx);
       const token = generateTerminalToken();
       harness.cookieToken = token;
@@ -519,7 +558,7 @@ describe("login", () => {
 
       const result = await login({ email: user.email, password: WRONG_PASSWORD });
 
-      expect(result).toEqual({ ok: false });
+      expect(reasonOf(result)).toBe("bad_credentials");
       const rows = await auditRows(tx, "auth.login_failed", user.id);
       expect(rows).toHaveLength(1);
       expect(rows[0].payload).toEqual({ reason: "bad_password" });
@@ -527,7 +566,7 @@ describe("login", () => {
   });
 
   it("re-review: inactive user with correct password records inactive", async () => {
-    await withLoginTransaction(async (tx) => {
+    await withCommittedFixtures(async (tx) => {
       const organizationId = await insertOrganization(tx);
       const token = generateTerminalToken();
       harness.cookieToken = token;
@@ -536,7 +575,7 @@ describe("login", () => {
 
       const result = await login({ email: user.email, password: TEST_PASSWORD });
 
-      expect(result).toEqual({ ok: false });
+      expect(reasonOf(result)).toBe("bad_credentials");
       const rows = await auditRows(tx, "auth.login_failed", user.id);
       expect(rows).toHaveLength(1);
       expect(rows[0].payload).toEqual({ reason: "inactive" });
@@ -544,7 +583,7 @@ describe("login", () => {
   });
 
   it("re-review: inactive user with wrong password records inactive_and_bad_password", async () => {
-    await withLoginTransaction(async (tx) => {
+    await withCommittedFixtures(async (tx) => {
       const organizationId = await insertOrganization(tx);
       const token = generateTerminalToken();
       harness.cookieToken = token;
@@ -553,7 +592,7 @@ describe("login", () => {
 
       const result = await login({ email: user.email, password: WRONG_PASSWORD });
 
-      expect(result).toEqual({ ok: false });
+      expect(reasonOf(result)).toBe("bad_credentials");
       const rows = await auditRows(tx, "auth.login_failed", user.id);
       expect(rows).toHaveLength(1);
       expect(rows[0].payload).toEqual({ reason: "inactive_and_bad_password" });
@@ -561,7 +600,7 @@ describe("login", () => {
   });
 
   it("re-review: database error keeps SQLSTATE through cause chain and logs only the code", async () => {
-    await withLoginTransaction(async (tx) => {
+    await withCommittedFixtures(async (tx) => {
       const organizationId = await insertOrganization(tx);
       const token = generateTerminalToken();
       harness.cookieToken = token;
@@ -579,7 +618,7 @@ describe("login", () => {
           password: WRONG_PASSWORD,
         });
 
-        expect(result).toEqual({ ok: false });
+        expect(reasonOf(result)).toBe("unavailable");
         expect(errorSpy).toHaveBeenCalledTimes(1);
         expect(errorSpy).toHaveBeenCalledWith("28P01");
         for (const call of errorSpy.mock.calls) {
@@ -629,7 +668,7 @@ describe("login", () => {
   });
 
   it("re-review: failure payloads contain no IP, email, password, or hash", async () => {
-    await withLoginTransaction(async (tx) => {
+    await withCommittedFixtures(async (tx) => {
       const organizationId = await insertOrganization(tx);
       const token = generateTerminalToken();
       harness.cookieToken = token;

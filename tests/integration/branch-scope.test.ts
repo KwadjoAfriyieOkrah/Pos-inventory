@@ -550,7 +550,8 @@ describe("branch scope", () => {
         rmSync(directory, { recursive: true, force: true });
       }
     }
-  }, 30000);
+    // ESLint subprocess timeout can exceed the 5s default under CPU load.
+  }, 60000);
 
   it("ESLint still allows src/server/auth/login.ts to import the database client", () => {
     const result = runEslint("src/server/auth/login.ts");
@@ -558,7 +559,8 @@ describe("branch scope", () => {
 
     expect(result.status).toBe(0);
     expect(output).not.toContain("no-restricted-imports");
-  });
+    // ESLint subprocess timeout can exceed the 5s default under CPU load.
+  }, 60000);
 
   it("inactive user gets an empty scope", async () => {
     await withRollback(async (tx) => {
@@ -631,7 +633,8 @@ describe("branch scope", () => {
     }
 
     expect(existsSync(file)).toBe(false);
-  });
+    // ESLint subprocess timeout can exceed the 5s default under CPU load.
+  }, 60000);
 
   it("ESLint reports no restricted-import error on src/server/data/scope.ts", () => {
     const result = runEslint("src/server/data/scope.ts");
@@ -639,7 +642,8 @@ describe("branch scope", () => {
 
     expect(result.status).toBe(0);
     expect(output).not.toContain("no-restricted-imports");
-  });
+    // ESLint subprocess timeout can exceed the 5s default under CPU load.
+  }, 60000);
 
   it("ADR 0006 contains four Rejected: and four Chosen: phrases", () => {
     const source = readFileSync(

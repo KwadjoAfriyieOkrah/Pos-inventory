@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
-import { eq, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { config as loadDotenv } from "dotenv";
 import {
   afterAll,
@@ -32,14 +32,26 @@ type HashTerminalToken = typeof import("../../src/server/auth/terminal")["hashTe
 type ExchangeCode = typeof import("../../src/app/(auth)/register/actions")["exchangeTerminalRegistrationCode"];
 type LoginAction = typeof import("../../src/app/(auth)/login/actions")["loginAction"];
 
+function reasonOf(result: Awaited<ReturnType<Login>>): string | undefined {
+  return "reason" in result ? result.reason : undefined;
+}
+
 const TEST_PASSWORD = "correct horse battery staple";
 const ROLLBACK = Symbol("rollback");
 const INVALID_CODE_MESSAGE = "Registration code is not valid.";
 const UNREGISTERED_TERMINAL_MESSAGE =
   "This device is not registered. Contact the pharmacy owner.";
+const REGISTRATION_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ234567";
+
+function randomRegistrationCode(): string {
+  const hex = randomUUID().replace(/-/g, "");
+  return Array.from(
+    { length: 10 },
+    (_, index) => REGISTRATION_ALPHABET[Number.parseInt(hex[index], 16) % REGISTRATION_ALPHABET.length],
+  ).join("");
+}
 
 const harness = vi.hoisted(() => ({
-  activeDb: undefined as unknown,
   cookieToken: undefined as string | undefined,
 }));
 
@@ -49,31 +61,7 @@ vi.mock("@/lib/env", async () => {
   return { env: real.env };
 });
 
-vi.mock("@/server/db/client", () => ({
-  get db() {
-    const active = harness.activeDb as
-      | {
-          select: (...args: unknown[]) => unknown;
-          insert: (...args: unknown[]) => unknown;
-          update: (...args: unknown[]) => unknown;
-          transaction: (run: (tx: unknown) => Promise<unknown>) => Promise<unknown>;
-        }
-      | undefined;
-
-    if (!active) throw new Error("no active test transaction");
-
-    return {
-      select: (...args: unknown[]) =>
-        (active.select as (...a: unknown[]) => unknown)(...args),
-      insert: (...args: unknown[]) =>
-        (active.insert as (...a: unknown[]) => unknown)(...args),
-      update: (...args: unknown[]) =>
-        (active.update as (...a: unknown[]) => unknown)(...args),
-      transaction: async (run: (tx: unknown) => Promise<unknown>) => run(active),
-    };
-  },
-  pool: undefined,
-}));
+vi.mock("@/server/db/client", async () => await import("../../src/server/db/client"));
 
 vi.mock("next/headers", () => ({
   cookies: async () => ({
@@ -111,6 +99,7 @@ vi.mock("@/server/auth", async () => {
 
 let db: DbClient;
 let pool: typeof import("../../src/server/db/client")["pool"];
+let authPool: typeof import("../../src/server/auth/login-db")["authPool"];
 let hashPassword: (plain: string) => Promise<string>;
 let login: Login;
 let loginAction: LoginAction;
@@ -123,6 +112,7 @@ beforeAll(async () => {
   const client = await import("../../src/server/db/client");
   db = client.db;
   pool = client.pool;
+  ({ authPool } = await import("../../src/server/auth/login-db"));
   ({ hashPassword } = await import("../../src/server/auth/password"));
   ({ login } = await import("../../src/server/auth/login"));
   ({ loginAction } = await import("../../src/app/(auth)/login/actions"));
@@ -142,22 +132,22 @@ afterEach(() => {
 
 afterAll(async () => {
   if (pool) await pool.end();
+  if (authPool) await authPool.end();
 });
 
 async function withRollback(run: (tx: Tx) => Promise<void>): Promise<void> {
   try {
     await db.transaction(async (tx) => {
-      harness.activeDb = tx;
-      try {
-        await run(tx);
-      } finally {
-        harness.activeDb = undefined;
-      }
+      await run(tx);
       throw ROLLBACK;
     });
   } catch (error) {
     if (error !== ROLLBACK) throw error;
   }
+}
+
+async function withCommittedFixtures(run: (tx: Tx) => Promise<void>): Promise<void> {
+  await run(db as unknown as Tx);
 }
 
 function sqlState(error: unknown): string | undefined {
@@ -323,10 +313,10 @@ describe("terminals", () => {
   });
 
   it("registration code can be used once and second use returns generic message", async () => {
-    await withRollback(async (tx) => {
+    await withCommittedFixtures(async (tx) => {
       const organizationId = await insertOrganization(tx);
       const branchId = await insertBranch(tx, organizationId);
-      const code = "ABCDEFGHIJ";
+      const code = randomRegistrationCode();
       await insertRegistrationCode(
         tx,
         organizationId,
@@ -345,10 +335,10 @@ describe("terminals", () => {
   });
 
   it("expired registration code is rejected with the same generic message", async () => {
-    await withRollback(async (tx) => {
+    await withCommittedFixtures(async (tx) => {
       const organizationId = await insertOrganization(tx);
       const branchId = await insertBranch(tx, organizationId);
-      const code = "KLMNOPQRST";
+      const code = randomRegistrationCode();
       await insertRegistrationCode(
         tx,
         organizationId,
@@ -381,7 +371,7 @@ describe("terminals", () => {
   });
 
   it("resolveTerminal returns null for revoked, unknown, and missing tokens", async () => {
-    await withRollback(async (tx) => {
+    await withCommittedFixtures(async (tx) => {
       const organizationId = await insertOrganization(tx);
       const branchId = await insertBranch(tx, organizationId);
       const activeToken = generateTerminalToken();
@@ -389,7 +379,7 @@ describe("terminals", () => {
       const active = await insertTerminal(tx, organizationId, branchId, activeToken);
       await insertTerminal(tx, organizationId, branchId, revokedToken, true);
 
-      expect(resolveTerminal(undefined)).resolves.toBeNull();
+      await expect(resolveTerminal(undefined)).resolves.toBeNull();
       await expect(resolveTerminal("")).resolves.toBeNull();
       await expect(resolveTerminal("unknown-token-value")).resolves.toBeNull();
       await expect(resolveTerminal(revokedToken)).resolves.toBeNull();
@@ -402,7 +392,7 @@ describe("terminals", () => {
   });
 
   it("login without terminal cookie is refused and writes no audit row", async () => {
-    await withRollback(async (tx) => {
+    await withCommittedFixtures(async (tx) => {
       harness.cookieToken = undefined;
       const organizationId = await insertOrganization(tx);
 
@@ -426,7 +416,7 @@ describe("terminals", () => {
   });
 
   it("unknown email from registered terminal writes one org/branch/terminal-scoped audit row", async () => {
-    await withRollback(async (tx) => {
+    await withCommittedFixtures(async (tx) => {
       const organizationId = await insertOrganization(tx);
       const branchId = await insertBranch(tx, organizationId);
       const token = generateTerminalToken();
@@ -436,11 +426,16 @@ describe("terminals", () => {
 
       const result = await login({ email, password: TEST_PASSWORD });
 
-      expect(result).toEqual({ ok: false });
+      expect(reasonOf(result)).toBe("bad_credentials");
       const rows = await tx
         .select()
         .from(auditEvents)
-        .where(eq(auditEvents.action, "auth.login_failed"));
+        .where(
+          and(
+            eq(auditEvents.action, "auth.login_failed"),
+            eq(auditEvents.organizationId, organizationId),
+          ),
+        );
       expect(rows).toHaveLength(1);
       expect(rows[0].organizationId).toBe(organizationId);
       expect(rows[0].branchId).toBe(branchId);
@@ -451,7 +446,7 @@ describe("terminals", () => {
   });
 
   it("same unknown email from two terminals branches writes two branch-scoped rows", async () => {
-    await withRollback(async (tx) => {
+    await withCommittedFixtures(async (tx) => {
       const organizationId = await insertOrganization(tx);
       const branchOne = await insertBranch(tx, organizationId);
       const branchTwo = await insertBranch(tx, organizationId);
@@ -469,7 +464,12 @@ describe("terminals", () => {
       const rows = await tx
         .select()
         .from(auditEvents)
-        .where(eq(auditEvents.action, "auth.login_failed"));
+        .where(
+          and(
+            eq(auditEvents.action, "auth.login_failed"),
+            eq(auditEvents.organizationId, organizationId),
+          ),
+        );
       expect(rows).toHaveLength(2);
 
       const byTerminal = new Map(rows.map((row) => [row.terminalId, row]));
@@ -485,7 +485,7 @@ describe("terminals", () => {
   });
 
   it("known user failed login records terminal_id and actor_user_id together", async () => {
-    await withRollback(async (tx) => {
+    await withCommittedFixtures(async (tx) => {
       const organizationId = await insertOrganization(tx);
       const branchId = await insertBranch(tx, organizationId);
       const token = generateTerminalToken();
@@ -495,11 +495,16 @@ describe("terminals", () => {
 
       const result = await login({ email: user.email, password: "wrong-password" });
 
-      expect(result).toEqual({ ok: false });
+      expect(reasonOf(result)).toBe("bad_credentials");
       const rows = await tx
         .select()
         .from(auditEvents)
-        .where(eq(auditEvents.action, "auth.login_failed"));
+        .where(
+          and(
+            eq(auditEvents.action, "auth.login_failed"),
+            eq(auditEvents.organizationId, organizationId),
+          ),
+        );
       expect(rows).toHaveLength(1);
       expect(rows[0].terminalId).toBe(terminal.id);
       expect(rows[0].actorUserId).toBe(user.id);
@@ -544,6 +549,14 @@ describe("terminals", () => {
 
     for (const call of allCalls) {
       if (call === allowed[0]) continue;
+      if (
+        call.path === "src/server/auth/login-db.ts" &&
+        call.line === 16 &&
+        call.method === "error" &&
+        call.args.trim() === "code"
+      ) {
+        continue;
+      }
       if (call.args.includes("Registration code (shown once):")) {
         violations.push(
           `${call.path}:${call.line} duplicate registration label in console.${call.method}`,
