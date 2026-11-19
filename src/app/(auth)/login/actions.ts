@@ -2,6 +2,7 @@
 
 import { AuthError } from "next-auth";
 import { signIn } from "@/server/auth";
+import { INVALID_LOGIN_MESSAGE } from "../../../server/auth/login";
 
 export async function loginAction(
   _previousState: { error: string | null },
@@ -11,7 +12,7 @@ export async function loginAction(
     await signIn("credentials", formData);
   } catch (error) {
     if (error instanceof AuthError) {
-      return { error: "Email or password is incorrect" };
+      return { error: INVALID_LOGIN_MESSAGE };
     }
 
     throw error;

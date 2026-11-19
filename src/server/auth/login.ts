@@ -5,6 +5,8 @@ import { auditEvents, users } from "../../../db/schema";
 import { db } from "@/server/db/client";
 import { DUMMY_HASH, verifyPassword } from "./password";
 
+export const INVALID_LOGIN_MESSAGE = "Email or password is incorrect";
+
 const credentialsSchema = z.object({
   email: z.string().email().max(254).transform((email) => email.toLowerCase()),
   password: z.string().min(8).max(128),
@@ -23,14 +25,21 @@ type LoginResult =
   | { ok: false };
 
 function databaseErrorCode(error: unknown): string {
-  if (
-    typeof error === "object" &&
-    error !== null &&
-    "code" in error &&
-    typeof error.code === "string" &&
-    /^[0-9A-Z]{5}$/.test(error.code)
-  ) {
-    return error.code;
+  let current = error;
+  const visited = new Set<object>();
+
+  while (typeof current === "object" && current !== null && !visited.has(current)) {
+    visited.add(current);
+
+    if (
+      "code" in current &&
+      typeof current.code === "string" &&
+      /^[0-9A-Z]{5}$/.test(current.code)
+    ) {
+      return current.code;
+    }
+
+    current = "cause" in current ? current.cause : undefined;
   }
 
   return "unknown";
@@ -70,6 +79,12 @@ export async function login(input: unknown): Promise<LoginResult> {
   const passwordMatches = await verifyPassword(user.passwordHash, password);
 
   if (!passwordMatches || !user.isActive) {
+    const reason = !user.isActive
+      ? passwordMatches
+        ? "inactive"
+        : "inactive_and_bad_password"
+      : "bad_password";
+
     // Login is refused when the audit write fails; this is deliberate.
     try {
       await db.insert(auditEvents).values({
@@ -78,7 +93,7 @@ export async function login(input: unknown): Promise<LoginResult> {
         action: "auth.login_failed",
         entityType: "user",
         entityId: user.id,
-        payload: { reason: user.isActive ? "bad_password" : "inactive" },
+        payload: { reason },
       });
     } catch (error) {
       console.error(databaseErrorCode(error));
