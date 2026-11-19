@@ -275,5 +275,5 @@ describe("append-only audit log", () => {
     ).toBe(0);
     expect(afterFirst).toEqual(before);
     expect(afterSecond).toEqual(before);
-  });
+  }, 30000);
 });

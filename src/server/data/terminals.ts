@@ -1,14 +1,23 @@
 import { and, eq } from "drizzle-orm";
 import { terminals } from "../../../db/schema";
 import { db } from "@/server/db/client";
-import { requireBranch, type DataScope } from "./scope";
+import { PERMISSIONS } from "./permissions";
+import {
+  requireBranch,
+  type AuthorizedBranch,
+  type DataScope,
+} from "./scope";
 
 export async function listTerminals(
   scope: DataScope,
-  branchId: string,
+  access: AuthorizedBranch,
   options: { limit: number } = { limit: 200 },
 ) {
-  requireBranch(scope, branchId, "user.manage");
+  access = await requireBranch(
+    scope,
+    access.branchId,
+    PERMISSIONS.userManage,
+  );
 
   const requestedLimit = Number.isFinite(options.limit)
     ? Math.trunc(options.limit)
@@ -27,8 +36,8 @@ export async function listTerminals(
     .from(terminals)
     .where(
       and(
-        eq(terminals.organizationId, scope.organizationId),
-        eq(terminals.branchId, branchId),
+        eq(terminals.organizationId, access.organizationId),
+        eq(terminals.branchId, access.branchId),
       ),
     )
     .limit(limit);

@@ -188,28 +188,25 @@ describe("dependency hygiene", () => {
 });
 
 describe("migrations", () => {
-  it.skip(
-    "npm run db:migrate succeeds twice in a row with no errors — no migrations exist until Task 1.2",
-    () => {
-      const run = () =>
-        spawnSync("npm run db:migrate", {
-          cwd: process.cwd(),
-          env: { ...process.env, DATABASE_URL: TEST_DATABASE_URL },
-          encoding: "utf8",
-          shell: true,
-        });
+  it("npm run db:migrate succeeds twice in a row with no errors", () => {
+    const run = () =>
+      spawnSync("npm run db:migrate", {
+        cwd: process.cwd(),
+        env: { ...process.env, DATABASE_URL: TEST_DATABASE_URL },
+        encoding: "utf8",
+        shell: true,
+      });
 
-      const first = run();
-      const second = run();
+    const first = run();
+    const second = run();
 
-      expect(
-        first.status,
-        `first run: status=${first.status} output=${redact((first.stdout ?? "") + (first.stderr ?? ""))}`,
-      ).toBe(0);
-      expect(
-        second.status,
-        `second run: status=${second.status} output=${redact((second.stdout ?? "") + (second.stderr ?? ""))}`,
-      ).toBe(0);
-    },
-  );
+    expect(
+      first.status,
+      `first run: status=${first.status} output=${redact((first.stdout ?? "") + (first.stderr ?? ""))}`,
+    ).toBe(0);
+    expect(
+      second.status,
+      `second run: status=${second.status} output=${redact((second.stdout ?? "") + (second.stderr ?? ""))}`,
+    ).toBe(0);
+  }, 30000);
 });

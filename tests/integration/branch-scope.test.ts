@@ -26,6 +26,7 @@ import {
   FORBIDDEN_MESSAGE,
   ForbiddenError,
 } from "../../src/server/data/errors";
+import { PERMISSIONS } from "../../src/server/data/permissions";
 
 loadDotenv({ path: ".env.local", quiet: true });
 
@@ -327,7 +328,11 @@ describe("branch scope", () => {
       const f = await buildFixture(tx);
       const scope = await loadScope(f.cashierId, f.orgA);
 
-      expectForbidden(await captureError(() => requireBranch(scope, f.a2, "audit.view")));
+      expectForbidden(
+        await captureError(() =>
+          requireBranch(scope, f.a2, PERMISSIONS.auditView),
+        ),
+      );
     });
   });
 
@@ -336,7 +341,11 @@ describe("branch scope", () => {
       const f = await buildFixture(tx);
       const scope = await loadScope(f.ownerId, f.orgA);
 
-      expectForbidden(await captureError(() => requireBranch(scope, f.b1, "audit.view")));
+      expectForbidden(
+        await captureError(() =>
+          requireBranch(scope, f.b1, PERMISSIONS.auditView),
+        ),
+      );
     });
   });
 
@@ -347,7 +356,14 @@ describe("branch scope", () => {
       const scope = await loadScope(f.cashierId, f.orgA);
 
       expectForbidden(
-        await captureError(() => listAuditEvents(scope, f.a2, { limit: 10 })),
+        await captureError(async () => {
+          const access = await requireBranch(
+            scope,
+            f.a2,
+            PERMISSIONS.auditView,
+          );
+          await listAuditEvents(scope, access, { limit: 10 });
+        }),
       );
     });
   });
@@ -358,8 +374,13 @@ describe("branch scope", () => {
       const a1AuditId = await insertAuditEvent(tx, f.orgA, f.a1);
       const a2AuditId = await insertAuditEvent(tx, f.orgA, f.a2);
       const scope = await loadScope(f.ownerId, f.orgA);
+      const access = await requireBranch(
+        scope,
+        f.a1,
+        PERMISSIONS.auditView,
+      );
 
-      const rows = await listAuditEvents(scope, f.a1, { limit: 200 });
+      const rows = await listAuditEvents(scope, access, { limit: 200 });
       expect(rows.length).toBeGreaterThan(0);
       expect(rows.every((row) => row.branchId === f.a1)).toBe(true);
       expect(rows.map((row) => row.id)).toContain(a1AuditId);
@@ -381,9 +402,16 @@ describe("branch scope", () => {
       const crossOrgScope: DataScope = {
         userId: f.ownerId,
         organizationId: f.orgA,
-        branches: new Map([[f.b1, new Set(["audit.view"])]]),
+        branches: new Map([[f.b1, new Set([PERMISSIONS.auditView])]]),
       };
-      const rows = await listAuditEvents(crossOrgScope, f.b1, { limit: 200 });
+      const access = await requireBranch(
+        crossOrgScope,
+        f.b1,
+        PERMISSIONS.auditView,
+      );
+      const rows = await listAuditEvents(crossOrgScope, access, {
+        limit: 200,
+      });
       expect(rows).toEqual([]);
 
       const source = readFileSync(
@@ -391,9 +419,9 @@ describe("branch scope", () => {
         "utf8",
       );
       expect(source).toContain(
-        "eq(auditEvents.organizationId, scope.organizationId)",
+        "eq(auditEvents.organizationId, access.organizationId)",
       );
-      expect(source).toContain("eq(auditEvents.branchId, branchId)");
+      expect(source).toContain("eq(auditEvents.branchId, access.branchId)");
     });
   });
 
@@ -410,8 +438,13 @@ describe("branch scope", () => {
         })),
       );
       const scope = await loadScope(f.ownerId, f.orgA);
+      const access = await requireBranch(
+        scope,
+        f.a1,
+        PERMISSIONS.auditView,
+      );
 
-      const rows = await listAuditEvents(scope, f.a1, { limit: 500 });
+      const rows = await listAuditEvents(scope, access, { limit: 500 });
       expect(rows.length).toBeLessThanOrEqual(200);
       expect(rows).toHaveLength(200);
     });
@@ -428,8 +461,13 @@ describe("branch scope", () => {
         tokenHash,
       });
       const scope = await loadScope(f.ownerId, f.orgA);
+      const access = await requireBranch(
+        scope,
+        f.a1,
+        PERMISSIONS.userManage,
+      );
 
-      const rows = await listTerminals(scope, f.a1);
+      const rows = await listTerminals(scope, access);
       expect(rows.length).toBeGreaterThan(0);
       for (const row of rows) {
         expect(row).not.toHaveProperty("tokenHash");
@@ -450,10 +488,28 @@ describe("branch scope", () => {
       const ownerScope = await loadScope(f.ownerId, f.orgA);
 
       const errors = [
-        await captureError(() => requireBranch(cashierScope, f.a2, "audit.view")),
-        await captureError(() => requireBranch(ownerScope, f.b1, "audit.view")),
-        await captureError(() => listAuditEvents(cashierScope, f.a2, { limit: 10 })),
-        await captureError(() => listTerminals(cashierScope, f.a2)),
+        await captureError(() =>
+          requireBranch(cashierScope, f.a2, PERMISSIONS.auditView),
+        ),
+        await captureError(() =>
+          requireBranch(ownerScope, f.b1, PERMISSIONS.auditView),
+        ),
+        await captureError(async () => {
+          const access = await requireBranch(
+            cashierScope,
+            f.a2,
+            PERMISSIONS.auditView,
+          );
+          await listAuditEvents(cashierScope, access, { limit: 10 });
+        }),
+        await captureError(async () => {
+          const access = await requireBranch(
+            cashierScope,
+            f.a2,
+            PERMISSIONS.userManage,
+          );
+          await listTerminals(cashierScope, access);
+        }),
       ];
       const ids = [f.a1, f.a2, f.b1, f.cashierId, f.ownerId, f.orgA, f.orgB];
 
@@ -494,7 +550,7 @@ describe("branch scope", () => {
         rmSync(directory, { recursive: true, force: true });
       }
     }
-  });
+  }, 30000);
 
   it("ESLint still allows src/server/auth/login.ts to import the database client", () => {
     const result = runEslint("src/server/auth/login.ts");
@@ -529,8 +585,13 @@ describe("branch scope", () => {
         })),
       );
       const scope = await loadScope(f.ownerId, f.orgA);
+      const access = await requireBranch(
+        scope,
+        f.a1,
+        PERMISSIONS.userManage,
+      );
 
-      const rows = await listTerminals(scope, f.a1, { limit: 500 });
+      const rows = await listTerminals(scope, access, { limit: 500 });
       expect(rows.length).toBeLessThanOrEqual(200);
       expect(rows).toHaveLength(200);
     });

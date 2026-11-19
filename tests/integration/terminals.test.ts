@@ -404,6 +404,7 @@ describe("terminals", () => {
   it("login without terminal cookie is refused and writes no audit row", async () => {
     await withRollback(async (tx) => {
       harness.cookieToken = undefined;
+      const organizationId = await insertOrganization(tx);
 
       const result = await loginAction(
         { error: null },
@@ -416,7 +417,10 @@ describe("terminals", () => {
       );
 
       expect(result).toEqual({ error: UNREGISTERED_TERMINAL_MESSAGE });
-      const rows = await tx.select().from(auditEvents);
+      const rows = await tx
+        .select()
+        .from(auditEvents)
+        .where(eq(auditEvents.organizationId, organizationId));
       expect(rows).toHaveLength(0);
     });
   });

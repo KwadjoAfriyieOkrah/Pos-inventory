@@ -1,14 +1,23 @@
 import { and, desc, eq } from "drizzle-orm";
 import { auditEvents } from "../../../db/schema";
 import { db } from "@/server/db/client";
-import { requireBranch, type DataScope } from "./scope";
+import { PERMISSIONS } from "./permissions";
+import {
+  requireBranch,
+  type AuthorizedBranch,
+  type DataScope,
+} from "./scope";
 
 export async function listAuditEvents(
   scope: DataScope,
-  branchId: string,
+  access: AuthorizedBranch,
   options: { limit: number },
 ) {
-  requireBranch(scope, branchId, "audit.view");
+  access = await requireBranch(
+    scope,
+    access.branchId,
+    PERMISSIONS.auditView,
+  );
 
   const requestedLimit = Number.isFinite(options.limit)
     ? Math.trunc(options.limit)
@@ -32,8 +41,8 @@ export async function listAuditEvents(
     .from(auditEvents)
     .where(
       and(
-        eq(auditEvents.organizationId, scope.organizationId),
-        eq(auditEvents.branchId, branchId),
+        eq(auditEvents.organizationId, access.organizationId),
+        eq(auditEvents.branchId, access.branchId),
       ),
     )
     .orderBy(desc(auditEvents.createdAt))

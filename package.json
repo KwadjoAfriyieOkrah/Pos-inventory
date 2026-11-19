@@ -11,7 +11,8 @@
     "db:migrate": "drizzle-kit migrate",
     "db:studio": "drizzle-kit studio",
     "db:check": "node db/check.mjs",
-    "terminal:register": "node --experimental-strip-types scripts/register-terminal.ts"
+    "terminal:register": "node --experimental-strip-types scripts/register-terminal.ts",
+    "test:db:reset": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --experimental-strip-types scripts/reset-test-db.ts"
   },
   "dependencies": {
     "@node-rs/argon2": "^2.2.2",

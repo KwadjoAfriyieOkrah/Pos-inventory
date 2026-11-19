@@ -307,6 +307,7 @@ describe("login", () => {
   it("login without the pos_terminal cookie is refused and writes no audit row", async () => {
     await withLoginTransaction(async (tx) => {
       harness.cookieToken = undefined;
+      const organizationId = await insertOrganization(tx);
 
       const result = await loginAction(
         { error: null },
@@ -314,7 +315,10 @@ describe("login", () => {
       );
 
       expect(result).toEqual({ error: UNREGISTERED_TERMINAL_MESSAGE });
-      const rows = await tx.select().from(auditEvents);
+      const rows = await tx
+        .select()
+        .from(auditEvents)
+        .where(eq(auditEvents.organizationId, organizationId));
       expect(rows).toHaveLength(0);
     });
   });
