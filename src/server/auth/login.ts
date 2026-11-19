@@ -1,11 +1,15 @@
 import "server-only";
 import { z } from "zod";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
+import { cookies } from "next/headers";
 import { auditEvents, users } from "../../../db/schema";
 import { db } from "@/server/db/client";
 import { DUMMY_HASH, verifyPassword } from "./password";
+import { resolveTerminal } from "./terminal";
 
 export const INVALID_LOGIN_MESSAGE = "Email or password is incorrect";
+export const UNREGISTERED_TERMINAL_MESSAGE =
+  "This device is not registered. Contact the pharmacy owner.";
 
 const credentialsSchema = z.object({
   email: z.string().email().max(254).transform((email) => email.toLowerCase()),
@@ -50,6 +54,17 @@ export async function login(input: unknown): Promise<LoginResult> {
   if (!parsed.success) return { ok: false };
 
   const { email, password } = parsed.data;
+  let terminalToken: string | undefined;
+
+  try {
+    terminalToken = (await cookies()).get("pos_terminal")?.value;
+  } catch {
+    return { ok: false };
+  }
+
+  const terminal = await resolveTerminal(terminalToken);
+  if (!terminal) return { ok: false };
+
   let user;
 
   try {
@@ -63,7 +78,12 @@ export async function login(input: unknown): Promise<LoginResult> {
         isActive: users.isActive,
       })
       .from(users)
-      .where(eq(users.email, email))
+      .where(
+        and(
+          eq(users.email, email),
+          eq(users.organizationId, terminal.organizationId),
+        ),
+      )
       .limit(1);
   } catch (error) {
     console.error(databaseErrorCode(error));
@@ -72,7 +92,22 @@ export async function login(input: unknown): Promise<LoginResult> {
 
   if (!user) {
     await verifyPassword(DUMMY_HASH, password);
-    console.info(email.slice(email.lastIndexOf("@") + 1));
+
+    try {
+      await db.insert(auditEvents).values({
+        organizationId: terminal.organizationId,
+        branchId: terminal.branchId,
+        terminalId: terminal.id,
+        actorUserId: null,
+        action: "auth.login_failed",
+        entityType: "user",
+        payload: { reason: "unknown_email", attempted_email: email },
+      });
+    } catch (error) {
+      console.error(databaseErrorCode(error));
+      return { ok: false };
+    }
+
     return { ok: false };
   }
 
@@ -88,7 +123,9 @@ export async function login(input: unknown): Promise<LoginResult> {
     // Login is refused when the audit write fails; this is deliberate.
     try {
       await db.insert(auditEvents).values({
-        organizationId: user.organizationId,
+        organizationId: terminal.organizationId,
+        branchId: terminal.branchId,
+        terminalId: terminal.id,
         actorUserId: user.id,
         action: "auth.login_failed",
         entityType: "user",
@@ -107,7 +144,9 @@ export async function login(input: unknown): Promise<LoginResult> {
   try {
     await db.transaction(async (tx) => {
       await tx.insert(auditEvents).values({
-        organizationId: user.organizationId,
+        organizationId: terminal.organizationId,
+        branchId: terminal.branchId,
+        terminalId: terminal.id,
         actorUserId: user.id,
         action: "auth.login_succeeded",
         entityType: "user",

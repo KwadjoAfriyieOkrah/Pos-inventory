@@ -9,6 +9,7 @@ import {
 } from "drizzle-orm/pg-core";
 import { branches } from "./branches";
 import { organizations } from "./organizations";
+import { terminals } from "./terminals";
 import { users } from "./users";
 
 // Audit payloads must never include passwords, tokens, or other secrets.
@@ -20,6 +21,7 @@ export const auditEvents = pgTable(
       .notNull()
       .references(() => organizations.id),
     branchId: uuid("branch_id"),
+    terminalId: uuid("terminal_id"),
     actorUserId: uuid("actor_user_id"),
     action: text("action").notNull(),
     entityType: text("entity_type").notNull(),
@@ -41,8 +43,17 @@ export const auditEvents = pgTable(
       columns: [table.actorUserId, table.organizationId],
       foreignColumns: [users.id, users.organizationId],
     }),
+    foreignKey({
+      name: "audit_events_terminal_organization_fk",
+      columns: [table.terminalId, table.organizationId],
+      foreignColumns: [terminals.id, terminals.organizationId],
+    }),
     index("audit_events_branch_id_created_at_idx").on(
       table.branchId,
+      table.createdAt,
+    ),
+    index("audit_events_terminal_id_created_at_idx").on(
+      table.terminalId,
       table.createdAt,
     ),
     index("audit_events_organization_id_created_at_idx").on(

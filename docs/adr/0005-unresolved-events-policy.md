@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted
+Proposed
+Acceptance date: pending client sign-off.
 
 ## Decision
 

@@ -3,5 +3,7 @@ export * from "./branches";
 export * from "./organizations";
 export * from "./role-permissions";
 export * from "./roles";
+export * from "./terminal-registration-codes";
+export * from "./terminals";
 export * from "./user-branch-assignments";
 export * from "./users";

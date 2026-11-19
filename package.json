@@ -10,7 +10,8 @@
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
     "db:studio": "drizzle-kit studio",
-    "db:check": "node db/check.mjs"
+    "db:check": "node db/check.mjs",
+    "terminal:register": "node --experimental-strip-types scripts/register-terminal.ts"
   },
   "dependencies": {
     "@node-rs/argon2": "^2.2.2",
