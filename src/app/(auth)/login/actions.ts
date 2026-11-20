@@ -2,6 +2,7 @@
 
 import { AuthError } from "next-auth";
 import { cookies } from "next/headers";
+import { redirect } from "next/navigation";
 import { signIn } from "@/server/auth";
 import { INVALID_LOGIN_MESSAGE } from "../../../server/auth/login";
 import { resolveTerminal } from "../../../server/auth/terminal";
@@ -30,9 +31,10 @@ export async function loginAction(
     if (error instanceof AuthError) {
       return { error: INVALID_LOGIN_MESSAGE };
     }
-
     throw error;
   }
 
-  return { error: null };
+  // Reached only after a successful sign-in. redirect() works by throwing
+  // internally, so it must stay outside the try block above.
+  redirect("/dashboard");
 }

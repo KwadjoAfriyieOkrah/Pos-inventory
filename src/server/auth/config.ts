@@ -48,8 +48,11 @@ export const authConfig = {
     jwt({ token, user }) {
       if (user) {
         return {
+          ...token,
           sub: user.id,
           organizationId: user.organizationId,
+          email: user.email,
+          name: user.name,
         };
       }
 
@@ -67,6 +70,9 @@ export const authConfig = {
         ...session.user,
         id: token.sub,
         organizationId: token.organizationId,
+        email:
+          typeof token.email === "string" ? token.email : session.user.email,
+        name: typeof token.name === "string" ? token.name : session.user.name,
       };
 
       return session;
