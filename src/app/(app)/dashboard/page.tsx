@@ -29,7 +29,7 @@ async function SignedInContent() {
 
 export default function DashboardPage() {
   return (
-    <main style={{ maxWidth: 480, margin: "120px auto", padding: "0 16px" }}>
+    <main className="w-full max-w-3xl">
       <Suspense fallback={<p>Loading your session…</p>}>
         <SignedInContent />
       </Suspense>
