@@ -7,12 +7,21 @@ import { Pool } from "pg";
 import { DEFAULT_ROLE_PERMISSIONS } from "../db/seed/default-role-permissions";
 import {
   branches,
+  batches,
+  medicines,
   organizations,
+  payments,
   rolePermissions,
   roles,
+  sales,
+  saleLines,
+  stockMovements,
   userBranchAssignments,
   users,
 } from "../db/schema";
+import { DEMO_CATALOG } from "../src/features/demo/catalog";
+import { DEMO_STOCK_BATCHES } from "../src/features/demo/stock";
+import { DEMO_BRANCHES } from "../src/features/demo/dashboard";
 
 config({ path: resolve(process.cwd(), ".env.local"), quiet: true });
 
@@ -256,8 +265,250 @@ console.log(await hashPassword(process.env.DEMO_CASHIER_PASSWORD ?? ""));`,
             roleId: cashierRoleId,
             organizationId: organization.id,
           },
+          {
+            userId: cashierId,
+            branchId: branchB.id,
+            roleId: cashierRoleId,
+            organizationId: organization.id,
+          },
         ])
         .onConflictDoNothing();
+
+      const insertedMedicines = await tx
+        .insert(medicines)
+        .values(
+          DEMO_CATALOG.map((medicine) => ({
+            organizationId: organization.id,
+            name: medicine.name,
+            dosageForm: medicine.dosageForm,
+            unitPricePesewas: medicine.unitPricePesewas,
+          })),
+        )
+        .onConflictDoNothing({
+          target: [medicines.organizationId, medicines.name],
+        })
+        .returning({ id: medicines.id });
+
+      const medicineRows = await tx
+        .select({
+          id: medicines.id,
+          name: medicines.name,
+        })
+        .from(medicines)
+        .where(eq(medicines.organizationId, organization.id));
+      const medicineIdByName = new Map(
+        medicineRows.map((medicine) => [medicine.name, medicine.id]),
+      );
+      const demoBranches = [
+        { id: branchA.id, name: branchA.name, figure: DEMO_BRANCHES[0] },
+        { id: branchB.id, name: branchB.name, figure: DEMO_BRANCHES[1] },
+      ];
+
+      let medicineCount = insertedMedicines.length;
+      let batchCount = 0;
+      let movementCount = 0;
+      let saleCount = 0;
+      let saleLineCount = 0;
+      let paymentCount = 0;
+
+      const accraDate = (() => {
+        const parts = new Intl.DateTimeFormat("en-CA", {
+          timeZone: "Africa/Accra",
+          year: "numeric",
+          month: "2-digit",
+          day: "2-digit",
+        }).formatToParts(new Date());
+        const values = Object.fromEntries(
+          parts
+            .filter((part) => part.type !== "literal")
+            .map((part) => [part.type, part.value]),
+        );
+        return `${values.year}-${values.month}-${values.day}`;
+      })();
+
+      for (const demoBranch of demoBranches) {
+        for (const demoBatch of DEMO_STOCK_BATCHES) {
+          const medicine = DEMO_CATALOG.find(
+            (item) => item.id === demoBatch.medicineId,
+          );
+          if (!medicine) throw new Error("Demo medicine unavailable");
+          const medicineId = medicineIdByName.get(medicine.name);
+          if (!medicineId) throw new Error("Demo medicine row unavailable");
+
+          const demoBatchNumber = `DEMO-${demoBatch.batchNumber}`;
+          const insertedBatches = await tx
+            .insert(batches)
+            .values({
+              organizationId: organization.id,
+              branchId: demoBranch.id,
+              medicineId,
+              batchNumber: demoBatchNumber,
+              expiryDate: demoBatch.expiryDate,
+              unitCostPesewas: demoBatch.unitCostPesewas,
+              quantityOnHand: demoBatch.quantityOnHand,
+            })
+            .onConflictDoNothing({
+              target: [
+                batches.branchId,
+                batches.medicineId,
+                batches.batchNumber,
+              ],
+            })
+            .returning({ id: batches.id });
+          if (insertedBatches.length > 0) batchCount += 1;
+
+          const [batch] = await tx
+            .select({
+              id: batches.id,
+              quantityOnHand: batches.quantityOnHand,
+            })
+            .from(batches)
+            .where(
+              and(
+                eq(batches.organizationId, organization.id),
+                eq(batches.branchId, demoBranch.id),
+                eq(batches.medicineId, medicineId),
+                eq(batches.batchNumber, demoBatchNumber),
+              ),
+            )
+            .limit(1);
+          if (!batch) throw new Error("Demo batch unavailable");
+
+          const [existingMovement] = await tx
+            .select({ id: stockMovements.id })
+            .from(stockMovements)
+            .where(eq(stockMovements.referenceId, batch.id))
+            .limit(1);
+
+          if (!existingMovement) {
+            await tx.insert(stockMovements).values({
+              organizationId: organization.id,
+              branchId: demoBranch.id,
+              batchId: batch.id,
+              movementType: "receipt",
+              quantityDelta: batch.quantityOnHand,
+              referenceId: batch.id,
+              createdBy: ownerId,
+            });
+            movementCount += 1;
+          }
+        }
+
+        const salesTarget = demoBranch.figure.salesTodayCount;
+        const targetPesewas = demoBranch.figure.salesTodayTotalPesewas;
+        const baseTotal = Math.floor(targetPesewas / salesTarget);
+        const remainder = targetPesewas - baseTotal * salesTarget;
+
+        for (let index = 0; index < salesTarget; index += 1) {
+          const saleTotal = baseTotal + (index < remainder ? 1 : 0);
+          const key = `demo-seed-${demoBranch.figure.id}-${index + 1}`;
+          const [existingSale] = await tx
+            .select({ id: sales.id })
+            .from(sales)
+            .where(
+              and(
+                eq(sales.branchId, demoBranch.id),
+                eq(sales.idempotencyKey, key),
+              ),
+            )
+            .limit(1);
+
+          let saleId = existingSale?.id;
+          if (!saleId) {
+            const [insertedSale] = await tx
+              .insert(sales)
+              .values({
+                organizationId: organization.id,
+                branchId: demoBranch.id,
+                cashierId: cashierId,
+                idempotencyKey: key,
+                totalPesewas: saleTotal,
+                paymentMethod: index % 5 === 4 ? "momo" : "cash",
+                createdAt: new Date(`${accraDate}T12:00:00.000Z`),
+              })
+              .onConflictDoNothing({
+                target: [sales.branchId, sales.idempotencyKey],
+              })
+              .returning({ id: sales.id });
+            saleId = insertedSale?.id;
+            if (saleId) saleCount += 1;
+          }
+
+          if (!saleId) {
+            const [sale] = await tx
+              .select({ id: sales.id })
+              .from(sales)
+              .where(
+                and(
+                  eq(sales.branchId, demoBranch.id),
+                  eq(sales.idempotencyKey, key),
+                ),
+              )
+              .limit(1);
+            saleId = sale?.id;
+          }
+          if (!saleId) throw new Error("Demo sale unavailable");
+
+          const topItem =
+            demoBranch.figure.topMedicinesThisWeek[
+              index % demoBranch.figure.topMedicinesThisWeek.length
+            ];
+          const catalogMedicine = DEMO_CATALOG.find(
+            (item) => item.id === topItem.medicineId,
+          );
+          if (!catalogMedicine) throw new Error("Demo catalog item unavailable");
+          const medicineId = medicineIdByName.get(catalogMedicine.name);
+          if (!medicineId) throw new Error("Demo medicine unavailable");
+
+          const [batch] = await tx
+            .select({ id: batches.id })
+            .from(batches)
+            .where(
+              and(
+                eq(batches.organizationId, organization.id),
+                eq(batches.branchId, demoBranch.id),
+                eq(batches.medicineId, medicineId),
+              ),
+            )
+            .limit(1);
+          if (!batch) throw new Error("Demo sale batch unavailable");
+
+          const [existingLine] = await tx
+            .select({ id: saleLines.id })
+            .from(saleLines)
+            .where(eq(saleLines.saleId, saleId))
+            .limit(1);
+          if (!existingLine) {
+            await tx.insert(saleLines).values({
+              saleId,
+              medicineId,
+              batchId: batch.id,
+              quantity: 1,
+              unitPricePesewas: saleTotal,
+              lineTotalPesewas: saleTotal,
+            });
+            saleLineCount += 1;
+          }
+
+          const [existingPayment] = await tx
+            .select({ id: payments.id })
+            .from(payments)
+            .where(eq(payments.saleId, saleId))
+            .limit(1);
+          if (!existingPayment) {
+            const isMomo = index % 5 === 4;
+            await tx.insert(payments).values({
+              saleId,
+              amountPesewas: saleTotal,
+              method: isMomo ? "momo" : "cash",
+              reference: isMomo
+                ? `DEMO-MOMO-${demoBranch.figure.id}-${index + 1}`
+                : null,
+            });
+            paymentCount += 1;
+          }
+        }
+      }
 
       return {
         branches: [branchA, branchB],
@@ -266,10 +517,16 @@ console.log(await hashPassword(process.env.DEMO_CASHIER_PASSWORD ?? ""));`,
           branches: 2,
           roles: 2,
           users: 2,
-          assignments: 3,
+          assignments: 4,
           permissions:
             DEFAULT_ROLE_PERMISSIONS.owner.length +
             DEFAULT_ROLE_PERMISSIONS.cashier.length,
+          medicines: medicineCount,
+          batches: batchCount,
+          movements: movementCount,
+          sales: saleCount,
+          saleLines: saleLineCount,
+          payments: paymentCount,
         },
       };
     });
@@ -280,7 +537,7 @@ console.log(await hashPassword(process.env.DEMO_CASHIER_PASSWORD ?? ""));`,
     }
     const { counts } = seeded;
     console.log(
-      `Counts: organizations=${counts.organizations} branches=${counts.branches} roles=${counts.roles} users=${counts.users} assignments=${counts.assignments} permissions=${counts.permissions}`,
+      `Inserted counts: medicines=${counts.medicines} batches=${counts.batches} movements=${counts.movements} sales=${counts.sales} saleLines=${counts.saleLines} payments=${counts.payments}`,
     );
     console.log("demo seed complete");
   } catch {

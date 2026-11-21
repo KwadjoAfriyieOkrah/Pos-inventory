@@ -29,6 +29,20 @@
       "when": 1795067010866,
       "tag": "0003_smooth_trauma",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1795281821415,
+      "tag": "0004_easy_mad_thinker",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1795281834649,
+      "tag": "0005_stock_append_only",
+      "breakpoints": true
     }
   ]
 }
