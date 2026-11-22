@@ -64,7 +64,9 @@ export function ReceiveForm({
         aria-live="polite"
         className="max-w-2xl rounded-2xl border border-teal-900/15 bg-white/70 p-6"
       >
-        <p className="text-sm font-semibold text-teal-900">{state.success}</p>
+        <p className="text-sm font-semibold text-teal-900" role="status">
+          {state.success}
+        </p>
         {state.receiptLines?.length ? (
           <ul className="mt-5 divide-y divide-stone-200 border-y border-stone-200">
             {state.receiptLines.map((line, index) => (

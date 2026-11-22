@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { Suspense } from "react";
 import { redirect } from "next/navigation";
 import { connection } from "next/server";
@@ -34,8 +35,15 @@ async function SignedInSales() {
 
   const access = await requireBranch(scope, branchId, PERMISSIONS.saleCreate);
   const medicines = await listSaleableMedicines(scope, access);
+  const idempotencyKey = randomUUID();
 
-  return <SalesScreen medicines={medicines} />;
+  return (
+    <SalesScreen
+      idempotencyKey={idempotencyKey}
+      key={idempotencyKey}
+      medicines={medicines}
+    />
+  );
 }
 
 export default function SalesPage() {

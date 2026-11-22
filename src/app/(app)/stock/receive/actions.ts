@@ -96,12 +96,18 @@ export async function receiveStockAction(
       access,
       result.receiptId,
     );
+    const receivedLine = receiptLines[0];
+    if (!receivedLine) {
+      throw new Error("The received receipt has no lines.");
+    }
+    const receivedNewMedicine =
+      newMedicine && receivedLine.status === "pending";
 
     return {
       error: null,
-      success: result.duplicate
-        ? "This receipt was already received."
-        : "Stock received successfully.",
+      success: receivedNewMedicine
+        ? `Received ${receivedLine.quantity} units of ${receivedLine.medicineName} (new). It's waiting for owner approval before it can be sold.`
+        : `Received ${receivedLine.quantity} units of ${receivedLine.medicineName}.`,
       receiptLines,
     };
   } catch (error) {

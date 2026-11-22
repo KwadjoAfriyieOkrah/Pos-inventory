@@ -1,6 +1,12 @@
 "use client";
 
+import { useRouter } from "next/navigation";
 import { useMemo, useState } from "react";
+import { useActionState } from "react";
+import {
+  completeSaleAction,
+  type SaleActionState,
+} from "@/app/(app)/sales/actions";
 import {
   addCartLine,
   getCartTotalPesewas,
@@ -22,16 +28,12 @@ type SaleableMedicine = {
 
 type SalesScreenProps = {
   medicines: readonly SaleableMedicine[];
+  idempotencyKey: string;
 };
 
 type PaymentMethod = "cash" | "momo";
 
-type SaleConfirmation = {
-  totalPesewas: number;
-  paymentMethod: PaymentMethod;
-  changePesewas?: number;
-  reference?: string;
-};
+const initialActionState: SaleActionState = { error: null, result: null };
 
 function getErrorMessage(error: unknown): string {
   if (error instanceof Error) {
@@ -41,7 +43,15 @@ function getErrorMessage(error: unknown): string {
   throw error;
 }
 
-export function SalesScreen({ medicines }: SalesScreenProps) {
+export function SalesScreen({
+  medicines,
+  idempotencyKey,
+}: SalesScreenProps) {
+  const router = useRouter();
+  const [actionState, formAction, isPending] = useActionState(
+    completeSaleAction,
+    initialActionState,
+  );
   const [search, setSearch] = useState("");
   const [cart, setCart] = useState<CartLine[]>([]);
   const [quantityDrafts, setQuantityDrafts] = useState<Record<string, string>>(
@@ -52,9 +62,6 @@ export function SalesScreen({ medicines }: SalesScreenProps) {
   const [tenderedInput, setTenderedInput] = useState("");
   const [momoReference, setMomoReference] = useState("");
   const [paymentError, setPaymentError] = useState("");
-  const [confirmation, setConfirmation] = useState<SaleConfirmation | null>(
-    null,
-  );
 
   const totalPesewas = getCartTotalPesewas(cart);
   const tenderedPesewas = parsePesewasInput(tenderedInput);
@@ -121,59 +128,13 @@ export function SalesScreen({ medicines }: SalesScreenProps) {
     setCartError("");
   }
 
-  function completeSale() {
-    if (cart.length === 0) {
-      setPaymentError("Add at least one item before completing the sale.");
-      return;
-    }
-
-    if (paymentMethod === "cash") {
-      if (tenderedPesewas === null) {
-        setPaymentError("Enter a valid amount using up to two decimal places.");
-        return;
-      }
-
-      if (tenderedPesewas < totalPesewas) {
-        setPaymentError("Tendered amount must cover the sale total.");
-        return;
-      }
-
-      setConfirmation({
-        totalPesewas,
-        paymentMethod,
-        changePesewas: getChangePesewas(totalPesewas, tenderedPesewas),
-      });
-    } else {
-      const reference = momoReference.trim();
-      if (!reference) {
-        setPaymentError("Enter the MoMo payment reference.");
-        return;
-      }
-
-      setConfirmation({ totalPesewas, paymentMethod, reference });
-    }
-
-    setPaymentError("");
-  }
-
-  function startNewSale() {
-    setCart([]);
-    setQuantityDrafts({});
-    setCartError("");
-    setTenderedInput("");
-    setMomoReference("");
-    setPaymentError("");
-    setConfirmation(null);
-    setPaymentMethod("cash");
-    setSearch("");
-  }
-
   const canCompleteSale =
     cart.length > 0 &&
     cartError.length === 0 &&
     (paymentMethod === "cash"
       ? tenderedPesewas !== null && tenderedPesewas >= totalPesewas
-      : momoReference.trim().length > 0);
+      : momoReference.trim().length >= 4 &&
+        momoReference.trim().length <= 40);
 
   return (
     <div className="pb-16 md:pb-0">
@@ -201,60 +162,62 @@ export function SalesScreen({ medicines }: SalesScreenProps) {
         </p>
       </div>
 
-      {confirmation ? (
+      {actionState.result ? (
         <section
           aria-labelledby="sale-confirmation-title"
           className="max-w-2xl rounded-2xl border border-stone-200 bg-white/70 p-6 md:p-8"
         >
           <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-teal-800">
-            Demo sale complete
+            Sale complete
           </p>
           <h2
             id="sale-confirmation-title"
             className="mt-3 text-2xl font-semibold tracking-tight"
           >
-            Sale confirmed
+            Sale recorded
           </h2>
-          <p className="mt-2 text-sm text-stone-600">
-            This confirmation is for demonstration only. Nothing was saved.
-          </p>
 
           <dl className="mt-7 divide-y divide-stone-200 border-y border-stone-200">
             <div className="flex items-center justify-between gap-4 py-4">
+              <dt className="text-sm text-stone-600">Sale number</dt>
+              <dd className="max-w-[65%] break-all text-right font-mono text-xs font-semibold">
+                {actionState.result.saleId}
+              </dd>
+            </div>
+            <div className="flex items-center justify-between gap-4 py-4">
               <dt className="text-sm text-stone-600">Total</dt>
               <dd className="font-mono text-lg font-semibold">
-                {formatPesewas(confirmation.totalPesewas)}
+                {formatPesewas(actionState.result.totalPesewas)}
               </dd>
             </div>
             <div className="flex items-center justify-between gap-4 py-4">
               <dt className="text-sm text-stone-600">Payment method</dt>
               <dd className="text-sm font-semibold">
-                {confirmation.paymentMethod === "cash" ? "Cash" : "MoMo"}
+                {actionState.result.paymentMethod === "cash" ? "Cash" : "MoMo"}
               </dd>
             </div>
-            {confirmation.paymentMethod === "cash" ? (
-              <div className="flex items-center justify-between gap-4 py-4">
-                <dt className="text-sm text-stone-600">Change</dt>
-                <dd className="font-mono text-sm font-semibold">
-                  {formatPesewas(confirmation.changePesewas ?? 0)}
-                </dd>
-              </div>
-            ) : (
+            <div className="flex items-center justify-between gap-4 py-4">
+              <dt className="text-sm text-stone-600">Change due</dt>
+              <dd className="font-mono text-sm font-semibold">
+                {formatPesewas(actionState.result.changePesewas)}
+              </dd>
+            </div>
+            {actionState.result.paymentMethod === "momo" ? (
               <div className="flex items-center justify-between gap-4 py-4">
                 <dt className="text-sm text-stone-600">MoMo reference</dt>
                 <dd className="max-w-[65%] break-all text-right text-sm font-semibold">
-                  {confirmation.reference}
+                  {actionState.result.reference}
                 </dd>
               </div>
-            )}
+            ) : null}
           </dl>
 
           <button
             className="mt-7 inline-flex min-h-12 items-center justify-center rounded-full bg-teal-800 px-6 text-sm font-semibold text-white transition hover:bg-teal-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-800"
-            onClick={startNewSale}
+            onClick={() => router.refresh()}
             type="button"
           >
-            Start a new sale
+            New sale
           </button>
         </section>
       ) : (
@@ -334,6 +297,31 @@ export function SalesScreen({ medicines }: SalesScreenProps) {
             aria-labelledby="cart-title"
             className="min-w-0 self-start rounded-2xl border border-stone-200 bg-white/70 p-5 md:p-6"
           >
+            <form action={formAction}>
+              <input
+                name="idempotencyKey"
+                type="hidden"
+                value={idempotencyKey}
+              />
+              <input
+                name="paymentMethod"
+                type="hidden"
+                value={paymentMethod}
+              />
+              {cart.flatMap((line) => [
+                <input
+                  key={`${line.id}-medicine`}
+                  name="medicineId"
+                  type="hidden"
+                  value={line.id}
+                />,
+                <input
+                  key={`${line.id}-quantity`}
+                  name="quantity"
+                  type="hidden"
+                  value={line.quantity}
+                />,
+              ])}
             <div className="flex items-baseline justify-between gap-3">
               <h2 id="cart-title" className="text-lg font-semibold tracking-tight">
                 Current sale
@@ -474,6 +462,7 @@ export function SalesScreen({ medicines }: SalesScreenProps) {
                     className="min-w-0 flex-1 bg-transparent py-2 font-mono text-sm outline-none placeholder:text-stone-400"
                     id="tendered"
                     inputMode="decimal"
+                    name="tenderedGhs"
                     onChange={(event) => {
                       setTenderedInput(event.currentTarget.value);
                       setPaymentError("");
@@ -515,6 +504,9 @@ export function SalesScreen({ medicines }: SalesScreenProps) {
                   autoComplete="off"
                   className="mt-2 min-h-12 w-full rounded-xl border border-stone-300 bg-white/70 px-3 text-sm outline-none placeholder:text-stone-400 focus:border-teal-800 focus:ring-2 focus:ring-teal-800/10"
                   id="momo-reference"
+                  maxLength={40}
+                  minLength={4}
+                  name="reference"
                   onChange={(event) => {
                     setMomoReference(event.currentTarget.value);
                     setPaymentError("");
@@ -532,18 +524,20 @@ export function SalesScreen({ medicines }: SalesScreenProps) {
                 {paymentError}
               </p>
             ) : null}
+            {actionState.error ? (
+              <p className="mt-3 text-xs text-red-800" role="alert">
+                {actionState.error}
+              </p>
+            ) : null}
 
             <button
               className="mt-5 min-h-12 w-full rounded-full bg-teal-800 px-5 text-sm font-semibold text-white transition hover:bg-teal-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-800 disabled:cursor-not-allowed disabled:bg-stone-300 disabled:text-stone-500"
-              disabled={!canCompleteSale}
-              onClick={completeSale}
-              type="button"
+              disabled={!canCompleteSale || isPending}
+              type="submit"
             >
-              Complete sale
+              {isPending ? "Recording sale…" : "Complete sale"}
             </button>
-            <p className="mt-3 text-center text-[11px] leading-relaxed text-stone-500">
-              Demo only · no payment or stock update will be recorded
-            </p>
+            </form>
           </section>
         </div>
       )}
