@@ -228,6 +228,8 @@ async function insertMedicine(
     organizationId,
     name,
     dosageForm: "tablet",
+    status: "active",
+    classification: "OTC",
     unitPricePesewas: 1250,
   });
   return medicineId;

@@ -3,6 +3,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import { formatPesewas } from "@/features/sales/format";
+import { MedicineActivationForm } from "@/features/stock/ReceiveForm";
 import { batchStatus } from "./status";
 import type { BatchStatus } from "./status";
 
@@ -22,6 +23,12 @@ type StockBranch = {
   name: string;
 };
 
+type PendingMedicine = {
+  id: string;
+  name: string;
+  dosageForm: string;
+};
+
 type StockScreenProps = {
   batches: readonly BranchBatch[];
   today: string;
@@ -29,6 +36,9 @@ type StockScreenProps = {
   branches: readonly StockBranch[];
   selectedBranchId: string;
   canViewStockValue: boolean;
+  canReceiveStock: boolean;
+  pendingMedicines: readonly PendingMedicine[];
+  canEditMedicines: boolean;
 };
 
 const FILTERS: readonly { id: StockFilter; label: string }[] = [
@@ -80,6 +90,9 @@ export function StockScreen({
   branches,
   selectedBranchId,
   canViewStockValue,
+  canReceiveStock,
+  pendingMedicines,
+  canEditMedicines,
 }: StockScreenProps) {
   const [filter, setFilter] = useState<StockFilter>("all");
   const batchStatuses = new Map(
@@ -144,16 +157,26 @@ export function StockScreen({
         <span>Demo database. Stock is not updated by sales yet.</span>
       </div>
 
-      <div className="mb-7">
-        <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-stone-400">
-          Inventory / Stock
-        </p>
-        <h1 className="mt-2 text-3xl font-semibold tracking-tight">
-          Stock overview
-        </h1>
-        <p className="mt-2 text-sm text-stone-600">
-          Batch quantities and expiry dates for {branchName}.
-        </p>
+      <div className="mb-7 flex flex-wrap items-end justify-between gap-4">
+        <div>
+          <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-stone-400">
+            Inventory / Stock
+          </p>
+          <h1 className="mt-2 text-3xl font-semibold tracking-tight">
+            Stock overview
+          </h1>
+          <p className="mt-2 text-sm text-stone-600">
+            Batch quantities and expiry dates for {branchName}.
+          </p>
+        </div>
+        {canReceiveStock ? (
+          <Link
+            className="inline-flex min-h-11 items-center rounded-full bg-teal-800 px-5 text-sm font-semibold text-white hover:bg-teal-900"
+            href="/stock/receive"
+          >
+            Receive stock
+          </Link>
+        ) : null}
       </div>
 
       {branches.length > 1 ? (
@@ -335,6 +358,50 @@ export function StockScreen({
           </div>
         </>
       )}
+
+      {pendingMedicines.length > 0 ? (
+        <section
+          aria-labelledby="pending-medicines-title"
+          className="mt-8 rounded-2xl border border-stone-200 bg-white/70 p-5 md:p-6"
+        >
+          <div className="mb-4">
+            <h2
+              className="text-lg font-semibold tracking-tight"
+              id="pending-medicines-title"
+            >
+              Pending medicines
+            </h2>
+            <p className="mt-1 text-xs text-stone-500">
+              New items need classification and a sale price before they can be sold.
+            </p>
+          </div>
+          <ul className="divide-y divide-stone-200 border-y border-stone-200">
+            {pendingMedicines.map((medicine) => (
+              <li className="py-4" key={medicine.id}>
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-semibold">{medicine.name}</p>
+                    <p className="mt-1 text-xs text-stone-500">
+                      {medicine.dosageForm}
+                    </p>
+                  </div>
+                  <span className="inline-flex min-h-8 items-center rounded-full bg-amber-100 px-3 text-xs font-semibold text-amber-900">
+                    Pending approval
+                  </span>
+                </div>
+                {canEditMedicines ? (
+                  <div className="mt-4">
+                    <MedicineActivationForm
+                      branchId={selectedBranchId}
+                      medicine={medicine}
+                    />
+                  </div>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
     </div>
   );
 }

@@ -1,5 +1,5 @@
 import "server-only";
-import { asc, eq } from "drizzle-orm";
+import { and, asc, eq } from "drizzle-orm";
 import { medicines } from "../../../db/schema";
 import { db } from "@/server/db/client";
 import { PERMISSIONS } from "./permissions";
@@ -26,14 +26,25 @@ export async function listSaleableMedicines(
       unitPricePesewas: medicines.unitPricePesewas,
     })
     .from(medicines)
-    .where(eq(medicines.organizationId, access.organizationId))
+    .where(
+      and(
+        eq(medicines.organizationId, access.organizationId),
+        eq(medicines.status, "active"),
+      ),
+    )
     .orderBy(asc(medicines.name));
 
   return rows.map((medicine) => {
-    if (!Number.isSafeInteger(medicine.unitPricePesewas)) {
+    if (
+      medicine.unitPricePesewas === null ||
+      !Number.isSafeInteger(medicine.unitPricePesewas)
+    ) {
       throw new RangeError("Medicine price exceeds the supported money range.");
     }
 
-    return medicine;
+    return {
+      ...medicine,
+      unitPricePesewas: medicine.unitPricePesewas,
+    };
   });
 }

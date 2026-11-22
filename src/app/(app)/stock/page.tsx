@@ -5,6 +5,7 @@ import { auth } from "@/server/auth";
 import { loadScope } from "@/server/auth/scope";
 import { accraToday } from "@/lib/time";
 import { listBranchBatches, listReadableBranches } from "@/server/data/stock";
+import { listPendingMedicines } from "@/server/data/receiving";
 import { PERMISSIONS } from "@/server/data/permissions";
 import { can, requireBranch } from "@/server/data/scope";
 import { StockScreen } from "@/features/stock/StockScreen";
@@ -49,9 +50,10 @@ async function SignedInStock({
     branchId,
     PERMISSIONS.reportViewBranch,
   );
-  const [branches, batches] = await Promise.all([
+  const [branches, batches, pendingMedicines] = await Promise.all([
     listReadableBranches(scope, access),
     listBranchBatches(scope, access),
+    listPendingMedicines(scope, access),
   ]);
   const selectedBranch = branches.find((branch) => branch.id === branchId);
   if (!selectedBranch) {
@@ -66,6 +68,9 @@ async function SignedInStock({
       branches={branches}
       selectedBranchId={branchId}
       canViewStockValue={can(scope, branchId, PERMISSIONS.reportViewAll)}
+      canReceiveStock={can(scope, branchId, PERMISSIONS.stockReceive)}
+      pendingMedicines={pendingMedicines}
+      canEditMedicines={can(scope, branchId, PERMISSIONS.medicineEdit)}
     />
   );
 }

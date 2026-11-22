@@ -1,0 +1,3 @@
+ALTER TABLE "medicines" ADD CONSTRAINT "medicines_status_check" CHECK ("medicines"."status" in ('pending', 'active'));--> statement-breakpoint
+ALTER TABLE "medicines" ADD CONSTRAINT "medicines_classification_check" CHECK ("medicines"."classification" is null or "medicines"."classification" in ('OTC', 'prescription_only', 'controlled'));--> statement-breakpoint
+ALTER TABLE "medicines" ADD CONSTRAINT "medicines_active_fields_check" CHECK ("medicines"."status" = 'pending' or ("medicines"."classification" is not null and "medicines"."unit_price_pesewas" is not null));

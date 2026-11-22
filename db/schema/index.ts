@@ -1,6 +1,7 @@
 export * from "./audit-events";
 export * from "./batches";
 export * from "./branches";
+export * from "./goods-receipts";
 export * from "./medicines";
 export * from "./organizations";
 export * from "./role-permissions";
