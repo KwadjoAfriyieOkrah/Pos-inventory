@@ -24,6 +24,7 @@ export async function exchangeTerminalRegistrationCode(
     sameSite: "strict",
     secure: process.env.NODE_ENV === "production",
     path: "/",
+    maxAge: 31536000,
   });
 
   return { ok: true };

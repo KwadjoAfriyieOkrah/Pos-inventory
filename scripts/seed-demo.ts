@@ -304,7 +304,7 @@ console.log(await hashPassword(process.env.DEMO_CASHIER_PASSWORD ?? ""));`,
         { id: branchB.id, name: branchB.name, figure: DEMO_BRANCHES[1] },
       ];
 
-      let medicineCount = insertedMedicines.length;
+      const medicineCount = insertedMedicines.length;
       let batchCount = 0;
       let movementCount = 0;
       let saleCount = 0;
