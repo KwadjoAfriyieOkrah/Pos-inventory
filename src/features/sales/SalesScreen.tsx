@@ -1,7 +1,6 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { DEMO_CATALOG, type DemoMedicine } from "@/features/demo/catalog";
 import {
   addCartLine,
   getCartTotalPesewas,
@@ -13,6 +12,17 @@ import {
   type CartLine,
 } from "@/features/sales/cart";
 import { formatPesewas } from "@/features/sales/format";
+
+type SaleableMedicine = {
+  id: string;
+  name: string;
+  dosageForm: string;
+  unitPricePesewas: number;
+};
+
+type SalesScreenProps = {
+  medicines: readonly SaleableMedicine[];
+};
 
 type PaymentMethod = "cash" | "momo";
 
@@ -31,7 +41,7 @@ function getErrorMessage(error: unknown): string {
   throw error;
 }
 
-export function SalesScreen() {
+export function SalesScreen({ medicines }: SalesScreenProps) {
   const [search, setSearch] = useState("");
   const [cart, setCart] = useState<CartLine[]>([]);
   const [quantityDrafts, setQuantityDrafts] = useState<Record<string, string>>(
@@ -55,12 +65,12 @@ export function SalesScreen() {
 
   const filteredCatalog = useMemo(() => {
     const query = search.trim().toLowerCase();
-    return DEMO_CATALOG.filter((medicine) =>
+    return medicines.filter((medicine) =>
       medicine.name.toLowerCase().includes(query),
     );
-  }, [search]);
+  }, [medicines, search]);
 
-  function addMedicine(medicine: DemoMedicine) {
+  function addMedicine(medicine: SaleableMedicine) {
     try {
       setCart(addCartLine(cart, medicine));
       setCartError("");
@@ -175,7 +185,10 @@ export function SalesScreen() {
           aria-hidden="true"
           className="size-2 shrink-0 rounded-full bg-teal-700"
         />
-        <span>Demo mode. Sales are not saved and stock is not updated.</span>
+        <span>
+          Figures come from the demo database. Completing a sale does not save
+          it yet.
+        </span>
       </div>
 
       <div className="mb-8">
@@ -256,7 +269,7 @@ export function SalesScreen() {
                   Medicine catalog
                 </h2>
                 <p className="mt-1 text-xs text-stone-500">
-                  {DEMO_CATALOG.length} demo items
+                  {medicines.length} medicines
                 </p>
               </div>
             </div>

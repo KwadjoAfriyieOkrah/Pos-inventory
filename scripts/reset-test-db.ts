@@ -33,6 +33,7 @@ export async function setup(): Promise<void> {
   const pool = new Pool({ connectionString });
   try {
     await pool.query("DROP SCHEMA public CASCADE");
+    await pool.query("DROP SCHEMA IF EXISTS drizzle CASCADE");
     await pool.query("CREATE SCHEMA public");
     await migrate(drizzle(pool), {
       migrationsFolder: resolve(process.cwd(), "db/migrations"),

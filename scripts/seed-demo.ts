@@ -90,11 +90,11 @@ console.log(await hashPassword(process.env.DEMO_CASHIER_PASSWORD ?? ""));`,
   }
   const pool = new Pool({ connectionString: databaseUrl });
   pool.on("error", (error) => {
-    const code =
-      "code" in error && typeof error.code === "string"
-        ? error.code
-        : "unknown";
-    console.error(code);
+ const sqlstate =
+  error && typeof error === "object" && "code" in error
+    ? error.code
+    : "unknown";
+console.error(`Demo seed database error: ${sqlstate}`);
   });
 
   type BranchResult = { id: string; name: string };

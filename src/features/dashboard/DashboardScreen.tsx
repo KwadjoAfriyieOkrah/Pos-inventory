@@ -1,37 +1,19 @@
-import { DEMO_CATALOG } from "@/features/demo/catalog";
-import { DEMO_BRANCHES } from "@/features/demo/dashboard";
-import { DEMO_STOCK_BATCHES, DEMO_TODAY } from "@/features/demo/stock";
 import { formatPesewas } from "@/features/sales/format";
-import {
-  getDashboardTotals,
-  getExpiryList,
-  getRestockList,
+import type {
+  DashboardBranchData,
+  DashboardTotals,
+  ExpiryAttention,
+  RestockAttention,
 } from "./summary";
 
-const restockList = getRestockList(DEMO_STOCK_BATCHES, DEMO_CATALOG);
-const expiryList = getExpiryList(
-  DEMO_TODAY,
-  DEMO_STOCK_BATCHES,
-  DEMO_CATALOG,
-);
-const dashboardTotals = getDashboardTotals(
-  DEMO_BRANCHES,
-  restockList,
-  expiryList,
-);
-const medicineById = new Map(DEMO_CATALOG.map((medicine) => [medicine.id, medicine]));
+type DashboardScreenProps = {
+  branches: readonly DashboardBranchData[];
+  totals: DashboardTotals;
+  restockList: readonly RestockAttention[];
+  expiryList: readonly ExpiryAttention[];
+};
 
-type CatalogMedicineId = (typeof DEMO_CATALOG)[number]["id"];
-
-function getMedicineName(medicineId: CatalogMedicineId): string {
-  const medicine = medicineById.get(medicineId);
-  if (!medicine) {
-    throw new Error(`Medicine not found in demo catalog: ${medicineId}`);
-  }
-  return medicine.name;
-}
-
-function expiryLabel(status: (typeof expiryList)[number]["status"]): string {
+function expiryLabel(status: ExpiryAttention["status"]): string {
   switch (status) {
     case "expired":
       return "Do not sell";
@@ -44,7 +26,12 @@ function expiryLabel(status: (typeof expiryList)[number]["status"]): string {
   }
 }
 
-export function DashboardScreen() {
+export function DashboardScreen({
+  branches,
+  totals,
+  restockList,
+  expiryList,
+}: DashboardScreenProps) {
   return (
     <div className="pb-16 md:pb-0">
       <div
@@ -55,7 +42,7 @@ export function DashboardScreen() {
           aria-hidden="true"
           className="size-2 shrink-0 rounded-full bg-teal-700"
         />
-        <span>Demo data. Figures are not live.</span>
+        <span>Demo database. Figures cover the last 7 days.</span>
       </div>
 
       <div className="mb-8">
@@ -66,27 +53,29 @@ export function DashboardScreen() {
           Owner dashboard
         </h1>
         <p className="mt-2 text-sm text-stone-600">
-          Today&apos;s sales and the inventory that needs attention.
+          The last week&apos;s sales and the inventory that needs attention.
         </p>
       </div>
 
       <section
-        aria-label="Today's summary"
+        aria-label="Last seven days summary"
         className="mb-8 grid gap-3 sm:grid-cols-3"
       >
         <article className="rounded-2xl border border-stone-200 bg-white/70 p-5">
-          <p className="text-xs font-medium text-stone-500">Sales today</p>
+          <p className="text-xs font-medium text-stone-500">
+            Sales, last 7 days
+          </p>
           <p className="mt-2 font-mono text-2xl font-semibold tracking-tight">
-            {formatPesewas(dashboardTotals.salesTodayTotalPesewas)}
+            {formatPesewas(totals.salesTotalPesewas)}
           </p>
           <p className="mt-2 text-xs text-stone-500">
-            {dashboardTotals.salesTodayCount} sales across both branches
+            {totals.salesCount} sales across {branches.length} branches
           </p>
         </article>
         <article className="rounded-2xl border border-stone-200 bg-white/70 p-5">
           <p className="text-xs font-medium text-stone-500">Restock batches</p>
           <p className="mt-2 font-mono text-2xl font-semibold tracking-tight">
-            {dashboardTotals.restockCount}
+            {totals.restockCount}
           </p>
           <p className="mt-2 text-xs text-stone-500">
             Batches with fewer than 20 units
@@ -95,7 +84,7 @@ export function DashboardScreen() {
         <article className="rounded-2xl border border-stone-200 bg-white/70 p-5">
           <p className="text-xs font-medium text-stone-500">Expiry attention</p>
           <p className="mt-2 font-mono text-2xl font-semibold tracking-tight">
-            {dashboardTotals.expiryCount}
+            {totals.expiryCount}
           </p>
           <p className="mt-2 text-xs text-stone-500">
             Expired or expiring within 60 days
@@ -116,22 +105,25 @@ export function DashboardScreen() {
               Branch performance
             </h2>
             <p className="mt-1 text-xs text-stone-500">
-              Today&apos;s takings and this week&apos;s top medicines
+              Sales and top medicines from the last 7 days
             </p>
           </div>
 
           <div className="divide-y divide-stone-200">
-            {DEMO_BRANCHES.map((branch) => (
-              <article className="py-5 first:pt-0 last:pb-0" key={branch.id}>
+            {branches.map((branch) => (
+              <article
+                className="py-5 first:pt-0 last:pb-0"
+                key={branch.branchId}
+              >
                 <div className="flex items-start justify-between gap-4">
                   <div>
-                    <h3 className="text-sm font-semibold">{branch.name}</h3>
+                    <h3 className="text-sm font-semibold">{branch.branchName}</h3>
                     <p className="mt-1 text-xs text-stone-500">
-                      {branch.salesTodayCount} sales today
+                      {branch.salesCount} sales in the last 7 days
                     </p>
                   </div>
                   <p className="shrink-0 font-mono text-base font-semibold">
-                    {formatPesewas(branch.salesTodayTotalPesewas)}
+                    {formatPesewas(branch.salesTotalPesewas)}
                   </p>
                 </div>
 
@@ -140,16 +132,16 @@ export function DashboardScreen() {
                     Top medicines this week
                   </p>
                   <ol className="divide-y divide-stone-100">
-                    {branch.topMedicinesThisWeek.map((item, index) => (
+                    {branch.topMedicines.map((item, index) => (
                       <li
                         className="flex min-h-11 items-center gap-3 py-2 text-sm"
-                        key={item.medicineId}
+                        key={item.medicineName}
                       >
                         <span className="w-5 font-mono text-xs text-stone-400">
                           {String(index + 1).padStart(2, "0")}
                         </span>
                         <span className="min-w-0 flex-1 truncate text-stone-700">
-                          {getMedicineName(item.medicineId)}
+                          {item.medicineName}
                         </span>
                         <span className="shrink-0 font-mono text-xs font-semibold">
                           {item.unitsSold} units
@@ -175,7 +167,7 @@ export function DashboardScreen() {
               Inventory attention
             </h2>
             <p className="mt-1 text-xs text-stone-500">
-              Quantities and expiry dates from demo batches
+              Quantities and expiry dates from database batches
             </p>
           </div>
 
@@ -188,14 +180,14 @@ export function DashboardScreen() {
             </div>
             {restockList.length > 0 ? (
               <ul className="divide-y divide-stone-200 border-y border-stone-200">
-                {restockList.map(({ batch, medicine }) => (
+                {restockList.map(({ batch, branchName }) => (
                   <li
                     className="flex min-h-11 items-center justify-between gap-3 py-3"
-                    key={batch.id}
+                    key={`${branchName}-${batch.id}`}
                   >
                     <span className="min-w-0">
                       <span className="block truncate text-sm font-medium">
-                        {medicine.name}
+                        {batch.medicineName} · {branchName}
                       </span>
                       <span className="mt-1 block font-mono text-[11px] text-stone-500">
                         {batch.batchNumber}
@@ -223,14 +215,14 @@ export function DashboardScreen() {
             </div>
             {expiryList.length > 0 ? (
               <ul className="divide-y divide-stone-200 border-y border-stone-200">
-                {expiryList.map(({ batch, medicine, status }) => (
+                {expiryList.map(({ batch, branchName, status }) => (
                   <li
                     className="flex min-h-11 items-center justify-between gap-3 py-3"
-                    key={batch.id}
+                    key={`${branchName}-${batch.id}`}
                   >
                     <span className="min-w-0">
                       <span className="block truncate text-sm font-medium">
-                        {medicine.name}
+                        {batch.medicineName} · {branchName}
                       </span>
                       <span className="mt-1 block text-[11px] text-stone-500">
                         {batch.batchNumber} · {batch.expiryDate}

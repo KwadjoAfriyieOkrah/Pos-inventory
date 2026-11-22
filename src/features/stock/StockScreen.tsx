@@ -1,13 +1,35 @@
 "use client";
 
 import { useState } from "react";
-import { DEMO_CATALOG } from "@/features/demo/catalog";
-import { DEMO_STOCK_BATCHES, DEMO_TODAY } from "@/features/demo/stock";
+import Link from "next/link";
 import { formatPesewas } from "@/features/sales/format";
-import { batchStatus, stockValuePesewas } from "./status";
+import { batchStatus } from "./status";
 import type { BatchStatus } from "./status";
 
 type StockFilter = "all" | "expiringSoon" | "lowStock";
+
+type BranchBatch = {
+  id: string;
+  batchNumber: string;
+  medicineName: string;
+  expiryDate: string;
+  quantityOnHand: number;
+  unitCostPesewas?: number;
+};
+
+type StockBranch = {
+  id: string;
+  name: string;
+};
+
+type StockScreenProps = {
+  batches: readonly BranchBatch[];
+  today: string;
+  branchName: string;
+  branches: readonly StockBranch[];
+  selectedBranchId: string;
+  canViewStockValue: boolean;
+};
 
 const FILTERS: readonly { id: StockFilter; label: string }[] = [
   { id: "all", label: "All" },
@@ -51,30 +73,38 @@ function BatchStatusLabel({ status }: { status: BatchStatus }) {
   );
 }
 
-export function StockScreen() {
+export function StockScreen({
+  batches,
+  today,
+  branchName,
+  branches,
+  selectedBranchId,
+  canViewStockValue,
+}: StockScreenProps) {
   const [filter, setFilter] = useState<StockFilter>("all");
-  const totalStockValue = stockValuePesewas(DEMO_STOCK_BATCHES);
   const batchStatuses = new Map(
-    DEMO_STOCK_BATCHES.map((batch) => [
+    batches.map((batch) => [
       batch.id,
-      batchStatus(batch, DEMO_TODAY),
+      batchStatus(batch, today),
     ]),
   );
 
-  const expiredCount = DEMO_STOCK_BATCHES.filter(
+  const expiredCount = batches.filter(
     (batch) => batchStatuses.get(batch.id) === "expired",
   ).length;
-  const expiringWithin60Count = DEMO_STOCK_BATCHES.filter((batch) => {
+  const expiringWithin60Count = batches.filter((batch) => {
     const status = batchStatuses.get(batch.id);
     return status === "within30" || status === "within60";
   }).length;
 
-  const medicineGroups = DEMO_CATALOG.map((medicine) => {
-    const batches = DEMO_STOCK_BATCHES.filter((batch) => {
-      if (batch.medicineId !== medicine.id) {
-        return false;
-      }
-
+  const groupedBatches = new Map<string, BranchBatch[]>();
+  for (const batch of batches) {
+    const group = groupedBatches.get(batch.medicineName) ?? [];
+    group.push(batch);
+    groupedBatches.set(batch.medicineName, group);
+  }
+  const medicineGroups = [...groupedBatches].map(([medicineName, allBatches]) => {
+    const medicineBatches = allBatches.filter((batch) => {
       const status = batchStatuses.get(batch.id);
       if (filter === "expiringSoon") {
         return status !== "ok";
@@ -85,8 +115,21 @@ export function StockScreen() {
       return true;
     });
 
-    return { medicine, batches };
+    return { medicineName, batches: medicineBatches };
   }).filter((group) => group.batches.length > 0);
+  const hasCompleteUnitCosts =
+    canViewStockValue &&
+    batches.every((batch) => Number.isSafeInteger(batch.unitCostPesewas));
+  const totalStockValue = hasCompleteUnitCosts
+    ? batches.reduce((total, batch) => {
+        const nextTotal =
+          total + batch.quantityOnHand * (batch.unitCostPesewas ?? 0);
+        if (!Number.isSafeInteger(nextTotal)) {
+          throw new RangeError("Stock value exceeds the supported money range.");
+        }
+        return nextTotal;
+      }, 0)
+    : null;
 
   return (
     <div className="pb-16 md:pb-0">
@@ -98,7 +141,7 @@ export function StockScreen() {
           aria-hidden="true"
           className="size-2 shrink-0 rounded-full bg-teal-700"
         />
-        <span>Demo data. Stock is not updated by sales.</span>
+        <span>Demo database. Stock is not updated by sales yet.</span>
       </div>
 
       <div className="mb-7">
@@ -109,9 +152,28 @@ export function StockScreen() {
           Stock overview
         </h1>
         <p className="mt-2 text-sm text-stone-600">
-          Batch quantities and expiry dates across the medicine catalog.
+          Batch quantities and expiry dates for {branchName}.
         </p>
       </div>
+
+      {branches.length > 1 ? (
+        <nav aria-label="Stock branch" className="mb-7 flex flex-wrap gap-2">
+          {branches.map((branch) => (
+            <Link
+              aria-current={branch.id === selectedBranchId ? "page" : undefined}
+              className={`inline-flex min-h-11 items-center rounded-full border px-4 text-sm font-medium transition ${
+                branch.id === selectedBranchId
+                  ? "border-teal-800 bg-teal-800 text-white"
+                  : "border-stone-300 text-stone-600 hover:border-stone-500 hover:text-stone-950"
+              }`}
+              href={`/stock?branch=${encodeURIComponent(branch.id)}`}
+              key={branch.id}
+            >
+              {branch.name}
+            </Link>
+          ))}
+        </nav>
+      ) : null}
 
       <section
         aria-label="Stock summary"
@@ -120,7 +182,9 @@ export function StockScreen() {
         <div className="py-4 sm:px-5 sm:py-5 sm:pl-0">
           <p className="text-xs font-medium text-stone-500">Total stock value</p>
           <p className="mt-2 font-mono text-2xl font-semibold tracking-tight">
-            {formatPesewas(totalStockValue)}
+            {totalStockValue === null
+              ? "Restricted"
+              : formatPesewas(totalStockValue)}
           </p>
         </div>
         <div className="py-4 sm:px-5 sm:py-5">
@@ -168,14 +232,11 @@ export function StockScreen() {
         <>
           <div className="space-y-7 lg:hidden">
             {medicineGroups.map((group) => (
-              <section key={group.medicine.id}>
+              <section key={group.medicineName}>
                 <div className="mb-2 flex items-baseline justify-between gap-3">
                   <h2 className="text-base font-semibold">
-                    {group.medicine.name}
+                    {group.medicineName}
                   </h2>
-                  <span className="text-xs text-stone-500">
-                    {group.medicine.dosageForm}
-                  </span>
                 </div>
                 <ul className="divide-y divide-stone-200 border-y border-stone-200">
                   {group.batches.map((batch) => {
@@ -231,17 +292,14 @@ export function StockScreen() {
                 </tr>
               </thead>
               {medicineGroups.map((group) => (
-                <tbody key={group.medicine.id}>
+                <tbody key={group.medicineName}>
                   <tr className="border-b border-stone-200 bg-stone-100/40">
                     <th
                       className="px-5 py-3 text-sm font-semibold"
                       colSpan={4}
                       scope="rowgroup"
                     >
-                      {group.medicine.name}
-                      <span className="ml-2 font-normal text-stone-500">
-                        {group.medicine.dosageForm}
-                      </span>
+                      {group.medicineName}
                     </th>
                   </tr>
                   {group.batches.map((batch) => {
