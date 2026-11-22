@@ -362,14 +362,14 @@ export function StockScreen({
       {pendingMedicines.length > 0 ? (
         <section
           aria-labelledby="pending-medicines-title"
-          className="mt-8 rounded-2xl border border-stone-200 bg-white/70 p-5 md:p-6"
+          className="mt-8 border-t border-stone-200 pt-6"
         >
           <div className="mb-4">
             <h2
               className="text-lg font-semibold tracking-tight"
               id="pending-medicines-title"
             >
-              Pending medicines
+              Awaiting approval
             </h2>
             <p className="mt-1 text-xs text-stone-500">
               New items need classification and a sale price before they can be sold.
@@ -385,18 +385,49 @@ export function StockScreen({
                       {medicine.dosageForm}
                     </p>
                   </div>
-                  <span className="inline-flex min-h-8 items-center rounded-full bg-amber-100 px-3 text-xs font-semibold text-amber-900">
-                    Pending approval
-                  </span>
-                </div>
-                {canEditMedicines ? (
-                  <div className="mt-4">
+                  {canEditMedicines ? (
                     <MedicineActivationForm
                       branchId={selectedBranchId}
                       medicine={medicine}
                     />
-                  </div>
-                ) : null}
+                  ) : (
+                    <span className="inline-flex min-h-8 items-center rounded-full bg-amber-100 px-3 text-xs font-semibold text-amber-900">
+                      Pending approval
+                    </span>
+                  )}
+                </div>
+                <ul className="mt-3 divide-y divide-stone-100 border-y border-stone-200">
+                  {batches
+                    .filter((batch) => batch.medicineName === medicine.name)
+                    .map((batch) => {
+                      const status = batchStatuses.get(batch.id)!;
+                      return (
+                        <li
+                          className="flex min-h-11 flex-wrap items-center justify-between gap-3 py-3 text-xs"
+                          key={batch.id}
+                        >
+                          <span className="font-mono font-medium">
+                            {batch.batchNumber}
+                          </span>
+                          <span>
+                            Expiry{" "}
+                            <time dateTime={batch.expiryDate}>
+                              {batch.expiryDate}
+                            </time>
+                          </span>
+                          <span className="font-mono">
+                            Qty {batch.quantityOnHand}
+                          </span>
+                          <BatchStatusLabel status={status} />
+                        </li>
+                      );
+                    })}
+                  {batches.every((batch) => batch.medicineName !== medicine.name) ? (
+                    <li className="py-3 text-xs text-stone-500">
+                      No batches received at this branch.
+                    </li>
+                  ) : null}
+                </ul>
               </li>
             ))}
           </ul>

@@ -14,6 +14,7 @@ import { toPesewas } from "@/lib/money";
 import { db } from "@/server/db/client";
 import { PERMISSIONS } from "./permissions";
 import {
+  can,
   requireBranch,
   type AuthorizedBranch,
   type DataScope,
@@ -210,6 +211,105 @@ export async function listReceivingMedicines(
     .from(medicines)
     .where(eq(medicines.organizationId, access.organizationId))
     .orderBy(asc(medicines.name));
+}
+
+type ReceiptLine = {
+  medicineName: string;
+  batchNumber: string;
+  expiryDate: string;
+  quantity: number;
+  status: "pending" | "active";
+  unitCostPesewas?: number;
+};
+
+export async function listReceiptLines(
+  scope: DataScope,
+  access: AuthorizedBranch,
+  receiptId: string,
+): Promise<ReceiptLine[]> {
+  access = await requireBranch(scope, access.branchId, PERMISSIONS.stockReceive);
+
+  const receiptFilter = and(
+    eq(goodsReceipts.id, receiptId),
+    eq(goodsReceipts.organizationId, access.organizationId),
+    eq(goodsReceipts.branchId, access.branchId),
+  );
+  const includeUnitCost = can(
+    scope,
+    access.branchId,
+    PERMISSIONS.reportViewAll,
+  );
+
+  if (includeUnitCost) {
+    const rows = await db
+      .select({
+        medicineName: medicines.name,
+        batchNumber: goodsReceiptLines.batchNumber,
+        expiryDate: goodsReceiptLines.expiryDate,
+        quantity: goodsReceiptLines.quantity,
+        status: medicines.status,
+        unitCostPesewas: goodsReceiptLines.unitCostPesewas,
+      })
+      .from(goodsReceiptLines)
+      .innerJoin(
+        goodsReceipts,
+        and(
+          eq(goodsReceipts.id, goodsReceiptLines.receiptId),
+          eq(goodsReceipts.organizationId, goodsReceiptLines.organizationId),
+        ),
+      )
+      .innerJoin(
+        medicines,
+        and(
+          eq(medicines.id, goodsReceiptLines.medicineId),
+          eq(medicines.organizationId, goodsReceiptLines.organizationId),
+        ),
+      )
+      .where(receiptFilter)
+      .orderBy(asc(medicines.name), asc(goodsReceiptLines.batchNumber));
+
+    return rows.map((line) => {
+      if (!Number.isSafeInteger(line.unitCostPesewas)) {
+        throw new RangeError("Receipt unit cost exceeds the supported money range.");
+      }
+
+      return {
+        ...line,
+        status: line.status === "pending" ? "pending" : "active",
+      };
+    });
+  }
+
+  const rows = await db
+    .select({
+      medicineName: medicines.name,
+      batchNumber: goodsReceiptLines.batchNumber,
+      expiryDate: goodsReceiptLines.expiryDate,
+      quantity: goodsReceiptLines.quantity,
+      status: medicines.status,
+    })
+    .from(goodsReceiptLines)
+    .innerJoin(
+      goodsReceipts,
+      and(
+        eq(goodsReceipts.id, goodsReceiptLines.receiptId),
+        eq(goodsReceipts.organizationId, goodsReceiptLines.organizationId),
+      ),
+    )
+    .innerJoin(
+      medicines,
+      and(
+        eq(medicines.id, goodsReceiptLines.medicineId),
+        eq(medicines.organizationId, goodsReceiptLines.organizationId),
+      ),
+    )
+    .where(receiptFilter)
+    .orderBy(asc(medicines.name), asc(goodsReceiptLines.batchNumber));
+
+  return rows.map((line) => ({
+    ...line,
+    status: line.status === "pending" ? "pending" : "active",
+  }));
 }
 
 export async function listPendingMedicines(

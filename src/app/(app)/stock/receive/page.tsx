@@ -36,6 +36,7 @@ async function SignedInReceivePage() {
 
   const access = await requireBranch(scope, branchId, PERMISSIONS.stockReceive);
   const medicines = await listReceivingMedicines(scope, access);
+  const idempotencyKey = randomUUID();
 
   return (
     <>
@@ -52,7 +53,8 @@ async function SignedInReceivePage() {
       </div>
       <ReceiveForm
         branchId={access.branchId}
-        idempotencyKey={randomUUID()}
+        idempotencyKey={idempotencyKey}
+        key={idempotencyKey}
         medicines={medicines}
         today={accraToday()}
       />

@@ -6,6 +6,7 @@ import { auth } from "@/server/auth";
 import { loadScope } from "@/server/auth/scope";
 import {
   activateMedicine,
+  listReceiptLines,
   receiveGoods,
   ReceivingValidationError,
 } from "@/server/data/receiving";
@@ -15,9 +16,21 @@ import { can, requireBranch } from "@/server/data/scope";
 export type ReceivingActionState = {
   error: string | null;
   success: string | null;
+  receiptLines: {
+    medicineName: string;
+    batchNumber: string;
+    expiryDate: string;
+    quantity: number;
+    status: "pending" | "active";
+    unitCostPesewas?: number;
+  }[] | null;
 };
 
-const initialState: ReceivingActionState = { error: null, success: null };
+const initialState: ReceivingActionState = {
+  error: null,
+  success: null,
+  receiptLines: null,
+};
 
 function formString(formData: FormData, name: string): string {
   const value = formData.get(name);
@@ -78,12 +91,18 @@ export async function receiveStockAction(
 
     revalidatePath("/stock");
     revalidatePath("/stock/receive");
+    const receiptLines = await listReceiptLines(
+      scope,
+      access,
+      result.receiptId,
+    );
 
     return {
       error: null,
       success: result.duplicate
         ? "This receipt was already received."
         : "Stock received successfully.",
+      receiptLines,
     };
   } catch (error) {
     if (error instanceof ReceivingValidationError) {
@@ -119,7 +138,11 @@ export async function activateMedicineAction(
       unitPriceGhs: formString(formData, "unitPriceGhs"),
     });
     revalidatePath("/stock");
-    return { error: null, success: "Medicine approved and activated." };
+    return {
+      error: null,
+      success: "Medicine approved and activated.",
+      receiptLines: null,
+    };
   } catch (error) {
     if (error instanceof ReceivingValidationError) {
       return { ...initialState, error: error.message };
