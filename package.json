@@ -13,7 +13,7 @@
     "db:check": "node db/check.mjs",
     "db:set-demo-passwords": "node --conditions=react-server --import=tsx scripts/set-demo-passwords.ts",
     "db:seed:demo": "node --conditions=react-server --import=tsx scripts/seed-demo.ts",
-    "terminal:register": "node --experimental-strip-types scripts/register-terminal.ts",
+    "terminal:register:demo": "node --experimental-strip-types scripts/register-demo.ts",
     "test:db:reset": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --experimental-strip-types scripts/reset-test-db.ts"
   },
   "dependencies": {
