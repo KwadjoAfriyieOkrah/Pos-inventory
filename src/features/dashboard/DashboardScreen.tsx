@@ -42,7 +42,9 @@ export function DashboardScreen({
           aria-hidden="true"
           className="size-2 shrink-0 rounded-full bg-teal-700"
         />
-        <span>Demo database. Figures cover the last 7 days.</span>
+        <span>
+          Demo database. Figures include sales completed in this demo.
+        </span>
       </div>
 
       <div className="mb-8">

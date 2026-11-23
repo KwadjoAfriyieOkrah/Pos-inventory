@@ -147,8 +147,8 @@ export function SalesScreen({
           className="size-2 shrink-0 rounded-full bg-teal-700"
         />
         <span>
-          Figures come from the demo database. Completing a sale does not save
-          it yet.
+          Sales are saved to the demo database. Stock is reduced when a sale
+          completes.
         </span>
       </div>
 
