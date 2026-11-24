@@ -1,0 +1,1 @@
+ALTER TABLE "sale_voids" ADD CONSTRAINT "sale_voids_sale_branch_fk" FOREIGN KEY ("sale_id","branch_id") REFERENCES "public"."sales"("id","branch_id") ON DELETE no action ON UPDATE no action;

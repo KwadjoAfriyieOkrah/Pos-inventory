@@ -52,6 +52,7 @@ export const sales = pgTable(
       table.branchId,
       table.saleNumber,
     ),
+    unique("sales_id_branch_id_unique").on(table.id, table.branchId),
     check(
       "sales_total_pesewas_check",
       sql`${table.totalPesewas} >= 0`,
