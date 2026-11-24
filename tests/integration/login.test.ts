@@ -1,24 +1,41 @@
 import { randomUUID } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { config as loadDotenv } from "dotenv";
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { auditEvents, branches, organizations, terminals, users } from "../../db/schema";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
+import {
+  auditEvents,
+  branches,
+  loginFailures,
+  organizations,
+  terminals,
+  users,
+} from "../../db/schema";
 import { branchCodeFromName } from "../../src/lib/sale-number";
+import { authDb } from "../../src/server/auth/login-db";
+import { hashKey } from "../../src/server/auth/rate-limit";
 
 loadDotenv({ path: ".env.local", quiet: true });
 
 type DbClient = typeof import("../../src/server/db/client")["db"];
-type Tx = Parameters<Parameters<DbClient["transaction"]>[0]>[0];
 type Login = typeof import("../../src/server/auth/login")["login"];
+type FailedLogin = Extract<Awaited<ReturnType<Login>>, { ok: false }>;
 type LoginAction = typeof import("../../src/app/(auth)/login/actions")["loginAction"];
 type GenerateTerminalToken = typeof import("../../src/server/auth/terminal")["generateTerminalToken"];
 type HashTerminalToken = typeof import("../../src/server/auth/terminal")["hashTerminalToken"];
 
 const TEST_PASSWORD = "correct horse battery staple";
 const WRONG_PASSWORD = "wrong horse battery staple";
-const ROLLBACK = Symbol("rollback");
 const ERROR_MESSAGE = "Email or password is incorrect";
 
 let branchCodeSequence = 0;
@@ -26,11 +43,6 @@ const UNREGISTERED_TERMINAL_MESSAGE =
   "This device is not registered. Contact the pharmacy owner.";
 
 const harness = vi.hoisted(() => ({
-  activeDb: undefined as unknown,
-  insertFailure: undefined as "succeeded" | "failed" | undefined,
-  selectError: undefined as unknown,
-  selectErrorOnCall: undefined as number | undefined,
-  selectCalls: 0,
   cookieToken: undefined as string | undefined,
 }));
 
@@ -46,47 +58,15 @@ vi.mock("next/headers", () => ({
     },
   }),
 }));
-vi.mock("@/lib/env", async () => {
-  const real = await import("../../src/lib/env");
-  return { env: real.env };
-});
-
-vi.mock("@/server/db/client", () => ({
-  get db() {
-    const active = harness.activeDb as
-      | {
-          select: (...args: unknown[]) => unknown;
-          insert: (...args: unknown[]) => unknown;
-          transaction: (run: (tx: unknown) => Promise<unknown>) => Promise<unknown>;
-        }
-      | undefined;
-
-    if (!active) throw new Error("no active test transaction");
-
-    return {
-      select: (...args: unknown[]) => {
-        harness.selectCalls += 1;
-        if (harness.selectError && harness.selectCalls === harness.selectErrorOnCall) {
-          throw harness.selectError;
-        }
-        return (active.select as (...a: unknown[]) => unknown)(...args);
-      },
-      insert: (...args: unknown[]) => {
-        if (harness.insertFailure === "failed") {
-          throw new Error("simulated auth.login_failed insert failure");
-        }
-        return (active.insert as (...a: unknown[]) => unknown)(...args);
-      },
-      transaction: async (run: (tx: unknown) => Promise<unknown>) => {
-        if (harness.insertFailure === "succeeded") {
-          throw new Error("simulated auth.login_succeeded insert failure");
-        }
-        return run(active);
-      },
-    };
+vi.mock("@/lib/env", () => ({
+  env: {
+    DATABASE_URL: process.env.DATABASE_URL,
+    AUTH_SECRET: "x".repeat(64),
+    APP_URL: "http://localhost:3000",
+    APP_TIMEZONE: "Africa/Accra",
   },
-  pool: undefined,
 }));
+vi.mock("@/server/db/client", async () => await import("../../src/server/db/client"));
 
 vi.mock("next-auth", () => {
   class AuthError extends Error {
@@ -110,18 +90,154 @@ vi.mock("@/server/auth", async () => {
   };
 });
 
+type Context = {
+  id: string;
+  organizationId: string;
+  branchId: string;
+  terminalId: string;
+  token: string;
+  email: string;
+  userId: string;
+};
+
 let db: DbClient;
 let pool: typeof import("../../src/server/db/client")["pool"];
+let authPool: typeof import("../../src/server/auth/login-db")["authPool"];
 let hashPassword: (plain: string) => Promise<string>;
 let login: Login;
 let loginAction: LoginAction;
 let generateTerminalToken: GenerateTerminalToken;
 let hashTerminalToken: HashTerminalToken;
+const createdContexts: Context[] = [];
+const usedEmailHashes = new Set<string>();
+
+function emailFor(prefix: string): string {
+  return `${prefix}-${randomUUID().replace(/-/g, "")}@example.invalid`;
+}
+
+async function createContext(isActive = true): Promise<Context> {
+  const organizationId = randomUUID();
+  const branchId = randomUUID();
+  const terminalId = randomUUID();
+  const userId = randomUUID();
+  const token = generateTerminalToken();
+  const email = emailFor("login-user");
+  const branchName = `login-branch-${randomUUID()}-${String.fromCharCode(65 + (branchCodeSequence++ % 26))}`;
+
+  await db.insert(organizations).values({
+    id: organizationId,
+    name: `Login Organization ${randomUUID()}`,
+  });
+  await db.insert(branches).values({
+    id: branchId,
+    organizationId,
+    name: branchName,
+    branchCode: branchCodeFromName(branchName),
+    digitalAddress: randomUUID(),
+    licenceNumber: randomUUID(),
+    licenceExpiresOn: "2030-01-01",
+  });
+  await db.insert(terminals).values({
+    id: terminalId,
+    organizationId,
+    branchId,
+    name: `Login Terminal ${randomUUID()}`,
+    tokenHash: hashTerminalToken(token),
+  });
+  await db.insert(users).values({
+    id: userId,
+    organizationId,
+    email,
+    fullName: "Login Test User",
+    passwordHash: await hashPassword(TEST_PASSWORD),
+    isActive,
+  });
+
+  const context = { id: userId, organizationId, branchId, terminalId, token, email, userId };
+  createdContexts.push(context);
+  usedEmailHashes.add(hashKey(email));
+  return context;
+}
+
+async function attemptEmail(
+  context: Context,
+  email: string,
+  password: string,
+): Promise<Awaited<ReturnType<Login>>> {
+  harness.cookieToken = context.token;
+  usedEmailHashes.add(hashKey(email));
+  return login({ email, password });
+}
+
+async function auditRows(
+  client: DbClient,
+  action: string,
+  actorUserId: string,
+) {
+  return client
+    .select()
+    .from(auditEvents)
+    .where(and(eq(auditEvents.action, action), eq(auditEvents.actorUserId, actorUserId)));
+}
+
+async function storedPasswordHash(client: DbClient, userId: string): Promise<string | null> {
+  const [row] = await client
+    .select({ passwordHash: users.passwordHash })
+    .from(users)
+    .where(eq(users.id, userId));
+  return row.passwordHash;
+}
+
+async function withAuditInsertFailure(action: string, run: () => Promise<void>): Promise<void> {
+  const suffix = randomUUID().replace(/-/g, "");
+  const functionName = `block_${suffix}`;
+  const triggerName = `block_${suffix}`;
+
+  try {
+    await db.execute(
+      sql.raw(
+        `CREATE FUNCTION ${functionName}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.action = '${action}' THEN RAISE EXCEPTION 'simulated audit insert failure'; END IF; RETURN NEW; END; $$`,
+      ),
+    );
+    await db.execute(
+      sql.raw(
+        `CREATE TRIGGER ${triggerName} BEFORE INSERT ON audit_events FOR EACH ROW EXECUTE FUNCTION ${functionName}();`,
+      ),
+    );
+    await run();
+  } finally {
+    await db.execute(sql.raw(`DROP TRIGGER IF EXISTS ${triggerName} ON audit_events;`));
+    await db.execute(sql.raw(`DROP FUNCTION IF EXISTS ${functionName}();`));
+  }
+}
+
+async function cleanUp(): Promise<void> {
+  const terminalIds = createdContexts.map((context) => context.terminalId);
+  const keyHashes = [
+    ...usedEmailHashes,
+    ...terminalIds.map((terminalId) => hashKey(terminalId)),
+  ];
+
+  if (keyHashes.length > 0) {
+    await db.delete(loginFailures).where(inArray(loginFailures.keyHash, keyHashes));
+  }
+
+  createdContexts.length = 0;
+  usedEmailHashes.clear();
+}
 
 beforeAll(async () => {
+  const databaseName = new URL(process.env.DATABASE_URL ?? "")
+    .pathname.replace(/^\/+/, "")
+    .toLowerCase();
+  if (databaseName !== "pos_test") {
+    throw new Error("Refusing to run: DATABASE_URL must point to pos_test.");
+  }
+
   const client = await import("../../src/server/db/client");
   db = client.db;
   pool = client.pool;
+  ({ authPool } = await import("../../src/server/auth/login-db"));
   ({ hashPassword } = await import("../../src/server/auth/password"));
   ({ login } = await import("../../src/server/auth/login"));
   ({ loginAction } = await import("../../src/app/(auth)/login/actions"));
@@ -131,109 +247,20 @@ beforeAll(async () => {
   } = await import("../../src/server/auth/terminal"));
 });
 
-afterEach(() => {
+beforeEach(() => {
   harness.cookieToken = undefined;
+});
+
+afterEach(async () => {
+  harness.cookieToken = undefined;
+  vi.restoreAllMocks();
+  await cleanUp();
 });
 
 afterAll(async () => {
   if (pool) await pool.end();
+  if (authPool) await authPool.end();
 });
-
-async function withLoginTransaction(run: (tx: Tx) => Promise<void>): Promise<void> {
-  try {
-    await db.transaction(async (tx) => {
-      harness.activeDb = tx;
-      try {
-        await run(tx);
-      } finally {
-        harness.activeDb = undefined;
-      }
-      throw ROLLBACK;
-    });
-  } catch (error) {
-    if (error !== ROLLBACK) throw error;
-  }
-}
-
-async function insertOrganization(tx: Tx): Promise<string> {
-  const [row] = await tx
-    .insert(organizations)
-    .values({ name: `login-org-${randomUUID()}` })
-    .returning();
-  return row.id;
-}
-
-async function insertBranch(tx: Tx, organizationId: string): Promise<string> {
-  const name = `login-branch-${randomUUID()}-${String.fromCharCode(65 + (branchCodeSequence++ % 26))}`;
-  const [branch] = await tx
-    .insert(branches)
-    .values({
-      organizationId,
-      name,
-      branchCode: branchCodeFromName(name),
-      digitalAddress: `addr-${randomUUID()}`,
-      licenceNumber: randomUUID(),
-      licenceExpiresOn: "2030-12-31",
-    })
-    .returning();
-  return branch.id;
-}
-
-async function insertTerminal(
-  tx: Tx,
-  organizationId: string,
-  branchId: string,
-  token: string,
-): Promise<{ terminalId: string }> {
-  const [terminal] = await tx
-    .insert(terminals)
-    .values({
-      organizationId,
-      branchId,
-      name: `login-terminal-${randomUUID()}`,
-      tokenHash: hashTerminalToken(token),
-    })
-    .returning();
-  return { terminalId: terminal.id };
-}
-
-async function insertUser(
-  tx: Tx,
-  organizationId: string,
-  isActive: boolean,
-): Promise<{ id: string; email: string }> {
-  const passwordHash = await hashPassword(TEST_PASSWORD);
-  const [row] = await tx
-    .insert(users)
-    .values({
-      organizationId,
-      email: `login-user-${randomUUID()}@example.com`,
-      fullName: "Login Test User",
-      passwordHash,
-      isActive,
-    })
-    .returning();
-  return { id: row.id, email: row.email };
-}
-
-async function storedPasswordHash(tx: Tx, userId: string): Promise<string | null> {
-  const [row] = await tx
-    .select({ passwordHash: users.passwordHash })
-    .from(users)
-    .where(eq(users.id, userId));
-  return row.passwordHash;
-}
-
-async function auditRows(
-  tx: Tx,
-  action: string,
-  actorUserId: string,
-) {
-  return tx
-    .select()
-    .from(auditEvents)
-    .where(and(eq(auditEvents.action, action), eq(auditEvents.actorUserId, actorUserId)));
-}
 
 function formFor(email: string, password: string): FormData {
   const formData = new FormData();
@@ -286,214 +313,178 @@ function consoleCallArguments(source: string): string[] {
 
 describe("login", () => {
   it("unknown email returns ok:false and writes one unknown_email audit row", async () => {
-    await withLoginTransaction(async (tx) => {
-      const organizationId = await insertOrganization(tx);
-      const branchId = await insertBranch(tx, organizationId);
-      const token = generateTerminalToken();
-      harness.cookieToken = token;
-      const terminal = await insertTerminal(tx, organizationId, branchId, token);
-      const email = `nobody-${randomUUID()}@example.com`;
-      const result = await login({ email, password: WRONG_PASSWORD });
+    const context = await createContext();
+    const organizationId = context.organizationId;
+    const branchId = context.branchId;
+    const terminal = { terminalId: context.terminalId };
+    const email = emailFor("nobody");
+    const result = await attemptEmail(context, email, WRONG_PASSWORD);
 
-      expect(result).toEqual({ ok: false });
-      const rows = await tx
-        .select()
-        .from(auditEvents)
-        .where(eq(auditEvents.action, "auth.login_failed"));
-      expect(rows).toHaveLength(1);
-      expect(rows[0].organizationId).toBe(organizationId);
-      expect(rows[0].branchId).toBe(branchId);
-      expect(rows[0].terminalId).toBe(terminal.terminalId);
-      expect(rows[0].actorUserId).toBeNull();
-      expect((rows[0].payload as { reason?: string }).reason).toBe("unknown_email");
-    });
+    expect(result.ok).toBe(false);
+    expect((result as FailedLogin).reason).toBe("bad_credentials");
+    expect((result as FailedLogin).message).toBe("Email or password is incorrect");
+    const rows = await db
+      .select()
+      .from(auditEvents)
+      .where(
+        and(
+          eq(auditEvents.organizationId, organizationId),
+          eq(auditEvents.action, "auth.login_failed"),
+        ),
+      );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].organizationId).toBe(organizationId);
+    expect(rows[0].branchId).toBe(branchId);
+    expect(rows[0].terminalId).toBe(terminal.terminalId);
+    expect(rows[0].actorUserId).toBeNull();
+    expect((rows[0].payload as { reason?: string }).reason).toBe("unknown_email");
   });
 
   it("login without the pos_terminal cookie is refused and writes no audit row", async () => {
-    await withLoginTransaction(async (tx) => {
-      harness.cookieToken = undefined;
-      const organizationId = await insertOrganization(tx);
+    const context = await createContext();
+    harness.cookieToken = undefined;
 
-      const result = await loginAction(
-        { error: null },
-        formFor(`nobody-${randomUUID()}@example.com`, TEST_PASSWORD),
-      );
+    const result = await loginAction(
+      { error: null },
+      formFor(emailFor("nobody"), TEST_PASSWORD),
+    );
 
-      expect(result).toEqual({ error: UNREGISTERED_TERMINAL_MESSAGE });
-      const rows = await tx
-        .select()
-        .from(auditEvents)
-        .where(eq(auditEvents.organizationId, organizationId));
-      expect(rows).toHaveLength(0);
-    });
+    expect(result).toEqual({ error: UNREGISTERED_TERMINAL_MESSAGE });
+    const rows = await db
+      .select()
+      .from(auditEvents)
+      .where(eq(auditEvents.organizationId, context.organizationId));
+    expect(rows).toHaveLength(0);
   });
 
   it("wrong password writes one bad_password audit row without credentials", async () => {
-    await withLoginTransaction(async (tx) => {
-      const organizationId = await insertOrganization(tx);
-      const token = generateTerminalToken();
-      harness.cookieToken = token;
-      await insertTerminal(tx, organizationId, await insertBranch(tx, organizationId), token);
-      const user = await insertUser(tx, organizationId, true);
+    const context = await createContext();
+    const user = { id: context.userId, email: context.email };
+    const result = await attemptEmail(context, user.email, WRONG_PASSWORD);
 
-      const result = await login({ email: user.email, password: WRONG_PASSWORD });
+    expect(result.ok).toBe(false);
+    expect((result as FailedLogin).reason).toBe("bad_credentials");
+    expect((result as FailedLogin).message).toBe("Email or password is incorrect");
+    const rows = await auditRows(db, "auth.login_failed", user.id);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].payload).toEqual({ reason: "bad_password" });
 
-      expect(result).toEqual({ ok: false });
-      const rows = await auditRows(tx, "auth.login_failed", user.id);
-      expect(rows).toHaveLength(1);
-      expect(rows[0].payload).toEqual({ reason: "bad_password" });
-
-      const payload = JSON.stringify(rows[0].payload);
-      expect(payload).not.toContain(user.email);
-      expect(payload).not.toContain(TEST_PASSWORD);
-      expect(payload).not.toContain(WRONG_PASSWORD);
-    });
+    const payload = JSON.stringify(rows[0].payload);
+    expect(payload).not.toContain(user.email);
+    expect(payload).not.toContain(TEST_PASSWORD);
+    expect(payload).not.toContain(WRONG_PASSWORD);
   });
 
   it("inactive user writes one inactive audit row", async () => {
-    await withLoginTransaction(async (tx) => {
-      const organizationId = await insertOrganization(tx);
-      const token = generateTerminalToken();
-      harness.cookieToken = token;
-      await insertTerminal(tx, organizationId, await insertBranch(tx, organizationId), token);
-      const user = await insertUser(tx, organizationId, false);
+    const context = await createContext(false);
+    const result = await attemptEmail(context, context.email, TEST_PASSWORD);
 
-      const result = await login({ email: user.email, password: TEST_PASSWORD });
-
-      expect(result).toEqual({ ok: false });
-      const rows = await auditRows(tx, "auth.login_failed", user.id);
-      expect(rows).toHaveLength(1);
-      expect(rows[0].payload).toEqual({ reason: "inactive" });
-    });
+    expect(result.ok).toBe(false);
+    expect((result as FailedLogin).reason).toBe("bad_credentials");
+    expect((result as FailedLogin).message).toBe("Email or password is incorrect");
+    const rows = await auditRows(db, "auth.login_failed", context.userId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].payload).toEqual({ reason: "inactive" });
   });
 
   it("correct password for active user writes one login_succeeded audit row", async () => {
-    await withLoginTransaction(async (tx) => {
-      const organizationId = await insertOrganization(tx);
-      const token = generateTerminalToken();
-      harness.cookieToken = token;
-      await insertTerminal(tx, organizationId, await insertBranch(tx, organizationId), token);
-      const user = await insertUser(tx, organizationId, true);
+    const context = await createContext();
+    const user = { id: context.userId, email: context.email };
+    const result = await attemptEmail(context, user.email, TEST_PASSWORD);
 
-      const result = await login({ email: user.email, password: TEST_PASSWORD });
-
-      expect(result.ok).toBe(true);
-      if (result.ok) {
-        expect(result.user.id).toBe(user.id);
-        expect(result.user.email).toBe(user.email);
-      }
-      const rows = await auditRows(tx, "auth.login_succeeded", user.id);
-      expect(rows).toHaveLength(1);
-      expect(rows[0].payload).toEqual({});
-    });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.user.id).toBe(user.id);
+      expect(result.user.email).toBe(user.email);
+    }
+    const rows = await auditRows(db, "auth.login_succeeded", user.id);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].payload).toEqual({});
   });
 
   it("failed login_succeeded audit insert returns ok:false and commits no login row", async () => {
-    await withLoginTransaction(async (tx) => {
-      const organizationId = await insertOrganization(tx);
-      const token = generateTerminalToken();
-      harness.cookieToken = token;
-      await insertTerminal(tx, organizationId, await insertBranch(tx, organizationId), token);
-      const user = await insertUser(tx, organizationId, true);
+    const context = await createContext();
+    let result: Awaited<ReturnType<Login>> | undefined;
 
-      harness.insertFailure = "succeeded";
-      let result: Awaited<ReturnType<Login>>;
-      try {
-        result = await login({ email: user.email, password: TEST_PASSWORD });
-      } finally {
-        harness.insertFailure = undefined;
-      }
-
-      expect(result).toEqual({ ok: false });
-      const rows = await tx
-        .select()
-        .from(auditEvents)
-        .where(eq(auditEvents.actorUserId, user.id));
-      expect(rows).toHaveLength(0);
+    await withAuditInsertFailure("auth.login_succeeded", async () => {
+      result = await attemptEmail(context, context.email, TEST_PASSWORD);
     });
+
+    expect(result!.ok).toBe(false);
+    expect((result as FailedLogin).reason).toBe("unavailable");
+    expect((result as FailedLogin).message).toBe(
+      "Login is temporarily unavailable. Try again shortly.",
+    );
+    const rows = await db
+      .select()
+      .from(auditEvents)
+      .where(eq(auditEvents.actorUserId, context.userId));
+    expect(rows).toHaveLength(0);
   });
 
   it("failed login_failed audit insert still returns ok:false and creates no session", async () => {
-    await withLoginTransaction(async (tx) => {
-      const organizationId = await insertOrganization(tx);
-      const token = generateTerminalToken();
-      harness.cookieToken = token;
-      await insertTerminal(tx, organizationId, await insertBranch(tx, organizationId), token);
-      const user = await insertUser(tx, organizationId, true);
+    const context = await createContext();
+    let result!: Awaited<ReturnType<Login>>;
 
-      harness.insertFailure = "failed";
-      let result: Awaited<ReturnType<Login>>;
-      try {
-        result = await login({ email: user.email, password: WRONG_PASSWORD });
-      } finally {
-        harness.insertFailure = undefined;
-      }
-
-      expect(result).toEqual({ ok: false });
-      expect("user" in result).toBe(false);
-      const rows = await tx
-        .select()
-        .from(auditEvents)
-        .where(eq(auditEvents.actorUserId, user.id));
-      expect(rows).toHaveLength(0);
+    await withAuditInsertFailure("auth.login_failed", async () => {
+      result = await attemptEmail(context, context.email, WRONG_PASSWORD);
     });
+
+    expect(result.ok).toBe(false);
+    expect((result as FailedLogin).reason).toBe("unavailable");
+    expect((result as FailedLogin).message).toBe(
+      "Login is temporarily unavailable. Try again shortly.",
+    );
+    expect("user" in result).toBe(false);
+    const rows = await db
+      .select()
+      .from(auditEvents)
+      .where(eq(auditEvents.actorUserId, context.userId));
+    expect(rows).toHaveLength(0);
   });
 
   it("reports unknown-email and wrong-password timings without failing on them", async () => {
-    await withLoginTransaction(async (tx) => {
-      const organizationId = await insertOrganization(tx);
-      const token = generateTerminalToken();
-      harness.cookieToken = token;
-      await insertTerminal(tx, organizationId, await insertBranch(tx, organizationId), token);
-      const user = await insertUser(tx, organizationId, true);
-      const unknownEmail = `nobody-${randomUUID()}@example.com`;
+    const context = await createContext();
+    const unknownEmail = emailFor("nobody");
 
-      const unknownStart = performance.now();
-      await login({ email: unknownEmail, password: WRONG_PASSWORD });
-      const unknownMs = performance.now() - unknownStart;
+    const unknownStart = performance.now();
+    await attemptEmail(context, unknownEmail, WRONG_PASSWORD);
+    const unknownMs = performance.now() - unknownStart;
 
-      const wrongStart = performance.now();
-      await login({ email: user.email, password: WRONG_PASSWORD });
-      const wrongMs = performance.now() - wrongStart;
+    const wrongStart = performance.now();
+    await attemptEmail(context, context.email, WRONG_PASSWORD);
+    const wrongMs = performance.now() - wrongStart;
 
-      console.log(
-        `timing report: unknown=${unknownMs.toFixed(1)}ms wrong=${wrongMs.toFixed(1)}ms`,
-      );
-      expect(Number.isFinite(unknownMs)).toBe(true);
-      expect(Number.isFinite(wrongMs)).toBe(true);
-    });
+    console.log(
+      `timing report: unknown=${unknownMs.toFixed(1)}ms wrong=${wrongMs.toFixed(1)}ms`,
+    );
+    expect(Number.isFinite(unknownMs)).toBe(true);
+    expect(Number.isFinite(wrongMs)).toBe(true);
   });
 
   it("shows exactly one error message for every failure path", async () => {
-    await withLoginTransaction(async (tx) => {
-      const organizationId = await insertOrganization(tx);
-      const token = generateTerminalToken();
-      harness.cookieToken = token;
-      await insertTerminal(tx, organizationId, await insertBranch(tx, organizationId), token);
-      const active = await insertUser(tx, organizationId, true);
-      const inactive = await insertUser(tx, organizationId, false);
+    const active = await createContext();
+    const inactive = await createContext(false);
 
-      const cases = [
-        formFor(`nobody-${randomUUID()}@example.com`, WRONG_PASSWORD),
-        formFor(active.email, WRONG_PASSWORD),
-        formFor(inactive.email, TEST_PASSWORD),
-      ];
+    const cases = [
+      formFor(emailFor("nobody"), WRONG_PASSWORD),
+      formFor(active.email, WRONG_PASSWORD),
+      formFor(inactive.email, TEST_PASSWORD),
+    ];
 
-      for (const formData of cases) {
-        const result = await loginAction({ error: null }, formData);
-        expect(result.error).toBe(ERROR_MESSAGE);
-      }
+    for (const formData of cases) {
+      harness.cookieToken = active.token;
+      const result = await loginAction({ error: null }, formData);
+      expect(result.error).toBe(ERROR_MESSAGE);
+    }
 
-      harness.insertFailure = "succeeded";
-      try {
-        const result = await loginAction(
-          { error: null },
-          formFor(active.email, TEST_PASSWORD),
-        );
-        expect(result.error).toBe(ERROR_MESSAGE);
-      } finally {
-        harness.insertFailure = undefined;
-      }
+    await withAuditInsertFailure("auth.login_succeeded", async () => {
+      harness.cookieToken = active.token;
+      const result = await loginAction(
+        { error: null },
+        formFor(active.email, TEST_PASSWORD),
+      );
+      expect(result.error).toBe(ERROR_MESSAGE);
     });
   });
 
@@ -515,87 +506,67 @@ describe("login", () => {
   });
 
   it("re-review: wrong password on active user records bad_password", async () => {
-    await withLoginTransaction(async (tx) => {
-      const organizationId = await insertOrganization(tx);
-      const token = generateTerminalToken();
-      harness.cookieToken = token;
-      await insertTerminal(tx, organizationId, await insertBranch(tx, organizationId), token);
-      const user = await insertUser(tx, organizationId, true);
+    const context = await createContext();
+    const result = await attemptEmail(context, context.email, WRONG_PASSWORD);
 
-      const result = await login({ email: user.email, password: WRONG_PASSWORD });
-
-      expect(result).toEqual({ ok: false });
-      const rows = await auditRows(tx, "auth.login_failed", user.id);
-      expect(rows).toHaveLength(1);
-      expect(rows[0].payload).toEqual({ reason: "bad_password" });
-    });
+    expect(result.ok).toBe(false);
+    expect((result as FailedLogin).reason).toBe("bad_credentials");
+    expect((result as FailedLogin).message).toBe("Email or password is incorrect");
+    const rows = await auditRows(db, "auth.login_failed", context.userId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].payload).toEqual({ reason: "bad_password" });
   });
 
   it("re-review: inactive user with correct password records inactive", async () => {
-    await withLoginTransaction(async (tx) => {
-      const organizationId = await insertOrganization(tx);
-      const token = generateTerminalToken();
-      harness.cookieToken = token;
-      await insertTerminal(tx, organizationId, await insertBranch(tx, organizationId), token);
-      const user = await insertUser(tx, organizationId, false);
+    const context = await createContext(false);
+    const result = await attemptEmail(context, context.email, TEST_PASSWORD);
 
-      const result = await login({ email: user.email, password: TEST_PASSWORD });
-
-      expect(result).toEqual({ ok: false });
-      const rows = await auditRows(tx, "auth.login_failed", user.id);
-      expect(rows).toHaveLength(1);
-      expect(rows[0].payload).toEqual({ reason: "inactive" });
-    });
+    expect(result.ok).toBe(false);
+    expect((result as FailedLogin).reason).toBe("bad_credentials");
+    expect((result as FailedLogin).message).toBe("Email or password is incorrect");
+    const rows = await auditRows(db, "auth.login_failed", context.userId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].payload).toEqual({ reason: "inactive" });
   });
 
   it("re-review: inactive user with wrong password records inactive_and_bad_password", async () => {
-    await withLoginTransaction(async (tx) => {
-      const organizationId = await insertOrganization(tx);
-      const token = generateTerminalToken();
-      harness.cookieToken = token;
-      await insertTerminal(tx, organizationId, await insertBranch(tx, organizationId), token);
-      const user = await insertUser(tx, organizationId, false);
+    const context = await createContext(false);
+    const result = await attemptEmail(context, context.email, WRONG_PASSWORD);
 
-      const result = await login({ email: user.email, password: WRONG_PASSWORD });
-
-      expect(result).toEqual({ ok: false });
-      const rows = await auditRows(tx, "auth.login_failed", user.id);
-      expect(rows).toHaveLength(1);
-      expect(rows[0].payload).toEqual({ reason: "inactive_and_bad_password" });
-    });
+    expect(result.ok).toBe(false);
+    expect((result as FailedLogin).reason).toBe("bad_credentials");
+    expect((result as FailedLogin).message).toBe("Email or password is incorrect");
+    const rows = await auditRows(db, "auth.login_failed", context.userId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].payload).toEqual({ reason: "inactive_and_bad_password" });
   });
 
   it("re-review: database error keeps SQLSTATE through cause chain and logs only the code", async () => {
-    await withLoginTransaction(async (tx) => {
-      const organizationId = await insertOrganization(tx);
-      const token = generateTerminalToken();
-      harness.cookieToken = token;
-      await insertTerminal(tx, organizationId, await insertBranch(tx, organizationId), token);
-      const inner = Object.assign(new Error("db connection failed"), { code: "28P01" });
-      const wrapped = new Error("query wrapper", { cause: inner });
-      harness.selectCalls = 0;
-      harness.selectError = wrapped;
-      harness.selectErrorOnCall = 2;
-      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-
-      try {
-        const result = await login({
-          email: `nobody-${randomUUID()}@example.com`,
-          password: WRONG_PASSWORD,
-        });
-
-        expect(result).toEqual({ ok: false });
-        expect(errorSpy).toHaveBeenCalledTimes(1);
-        expect(errorSpy).toHaveBeenCalledWith("28P01");
-        for (const call of errorSpy.mock.calls) {
-          expect(call).toEqual(["28P01"]);
-        }
-      } finally {
-        harness.selectError = undefined;
-        harness.selectErrorOnCall = undefined;
-        errorSpy.mockRestore();
-      }
+    const context = await createContext();
+    const inner = Object.assign(new Error("db connection failed"), { code: "28P01" });
+    const wrapped = new Error("query wrapper", { cause: inner });
+    const selectSpy = vi.spyOn(authDb, "select").mockImplementationOnce(() => {
+      throw wrapped;
     });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    try {
+      const result = await attemptEmail(context, emailFor("nobody"), WRONG_PASSWORD);
+
+      expect(result.ok).toBe(false);
+      expect((result as FailedLogin).reason).toBe("unavailable");
+      expect((result as FailedLogin).message).toBe(
+        "Login is temporarily unavailable. Try again shortly.",
+      );
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+      expect(errorSpy).toHaveBeenCalledWith("28P01");
+      for (const call of errorSpy.mock.calls) {
+        expect(call).toEqual(["28P01"]);
+      }
+    } finally {
+      selectSpy.mockRestore();
+      errorSpy.mockRestore();
+    }
   });
 
   it("re-review: INVALID_LOGIN_MESSAGE is exported and imported without duplicate literal", () => {
@@ -634,44 +605,38 @@ describe("login", () => {
   });
 
   it("re-review: failure payloads contain no IP, email, password, or hash", async () => {
-    await withLoginTransaction(async (tx) => {
-      const organizationId = await insertOrganization(tx);
-      const token = generateTerminalToken();
-      harness.cookieToken = token;
-      await insertTerminal(tx, organizationId, await insertBranch(tx, organizationId), token);
-      const activeWrong = await insertUser(tx, organizationId, true);
-      const inactiveCorrect = await insertUser(tx, organizationId, false);
-      const inactiveWrong = await insertUser(tx, organizationId, false);
+    const activeWrong = await createContext();
+    const inactiveCorrect = await createContext(false);
+    const inactiveWrong = await createContext(false);
 
-      await login({ email: activeWrong.email, password: WRONG_PASSWORD });
-      await login({ email: inactiveCorrect.email, password: TEST_PASSWORD });
-      await login({ email: inactiveWrong.email, password: WRONG_PASSWORD });
+    await attemptEmail(activeWrong, activeWrong.email, WRONG_PASSWORD);
+    await attemptEmail(inactiveCorrect, inactiveCorrect.email, TEST_PASSWORD);
+    await attemptEmail(inactiveWrong, inactiveWrong.email, WRONG_PASSWORD);
 
-      const cases = [
-        { user: activeWrong, reason: "bad_password" },
-        { user: inactiveCorrect, reason: "inactive" },
-        { user: inactiveWrong, reason: "inactive_and_bad_password" },
-      ];
-      const serialized: string[] = [];
+    const cases = [
+      { user: activeWrong, reason: "bad_password" },
+      { user: inactiveCorrect, reason: "inactive" },
+      { user: inactiveWrong, reason: "inactive_and_bad_password" },
+    ];
+    const serialized: string[] = [];
 
-      for (const testCase of cases) {
-        const rows = await auditRows(tx, "auth.login_failed", testCase.user.id);
-        expect(rows).toHaveLength(1);
-        expect(rows[0].payload).toEqual({ reason: testCase.reason });
-        serialized.push(JSON.stringify(rows[0].payload));
-      }
+    for (const testCase of cases) {
+      const rows = await auditRows(db, "auth.login_failed", testCase.user.userId);
+      expect(rows).toHaveLength(1);
+      expect(rows[0].payload).toEqual({ reason: testCase.reason });
+      serialized.push(JSON.stringify(rows[0].payload));
+    }
 
-      const combined = serialized.join(" ");
-      for (const testCase of cases) {
-        expect(combined).not.toContain(testCase.user.email);
-        const hash = await storedPasswordHash(tx, testCase.user.id);
-        if (hash) expect(combined).not.toContain(hash);
-      }
-      expect(combined).not.toContain(TEST_PASSWORD);
-      expect(combined).not.toContain(WRONG_PASSWORD);
-      expect(combined).not.toMatch(/\b(?:\d{1,3}\.){3}\d{1,3}\b/);
-      expect(combined).not.toMatch(/\b(?:[0-9a-fA-F]{1,4}:){2,}[0-9a-fA-F]{1,4}\b/);
-      expect(combined).not.toMatch(/\$argon2/);
-    });
+    const combined = serialized.join(" ");
+    for (const testCase of cases) {
+      expect(combined).not.toContain(testCase.user.email);
+      const hash = await storedPasswordHash(db, testCase.user.id);
+      if (hash) expect(combined).not.toContain(hash);
+    }
+    expect(combined).not.toContain(TEST_PASSWORD);
+    expect(combined).not.toContain(WRONG_PASSWORD);
+    expect(combined).not.toMatch(/\b(?:\d{1,3}\.){3}\d{1,3}\b/);
+    expect(combined).not.toMatch(/\b(?:[0-9a-fA-F]{1,4}:){2,}[0-9a-fA-F]{1,4}\b/);
+    expect(combined).not.toMatch(/\$argon2/);
   });
 });

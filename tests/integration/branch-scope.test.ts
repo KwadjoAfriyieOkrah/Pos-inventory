@@ -558,13 +558,14 @@ describe("branch scope", () => {
     }
   }, 30000);
 
+  // ESLint runs as a subprocess and can exceed the default 5-second timeout under load.
   it("ESLint still allows src/server/auth/login.ts to import the database client", () => {
     const result = runEslint("src/server/auth/login.ts");
     const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
 
     expect(result.status).toBe(0);
     expect(output).not.toContain("no-restricted-imports");
-  });
+  }, 30000);
 
   it("inactive user gets an empty scope", async () => {
     await withRollback(async (tx) => {

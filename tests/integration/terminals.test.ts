@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
-import { eq, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { config as loadDotenv } from "dotenv";
 import {
   afterAll,
@@ -15,18 +15,22 @@ import {
 import {
   auditEvents,
   branches,
+  loginFailures,
   organizations,
   terminalRegistrationCodes,
   terminals,
   users,
 } from "../../db/schema";
 import { branchCodeFromName } from "../../src/lib/sale-number";
+import { hashKey } from "../../src/server/auth/rate-limit";
 
 loadDotenv({ path: ".env.local", quiet: true });
 
 type DbClient = typeof import("../../src/server/db/client")["db"];
 type Tx = Parameters<Parameters<DbClient["transaction"]>[0]>[0];
+type Executor = DbClient | Tx;
 type Login = typeof import("../../src/server/auth/login")["login"];
+type FailedLogin = Extract<Awaited<ReturnType<Login>>, { ok: false }>;
 type ResolveTerminal = typeof import("../../src/server/auth/terminal")["resolveTerminal"];
 type GenerateTerminalToken = typeof import("../../src/server/auth/terminal")["generateTerminalToken"];
 type HashTerminalToken = typeof import("../../src/server/auth/terminal")["hashTerminalToken"];
@@ -52,31 +56,36 @@ vi.mock("@/lib/env", async () => {
   return { env: real.env };
 });
 
-vi.mock("@/server/db/client", () => ({
-  get db() {
-    const active = harness.activeDb as
-      | {
-          select: (...args: unknown[]) => unknown;
-          insert: (...args: unknown[]) => unknown;
-          update: (...args: unknown[]) => unknown;
-          transaction: (run: (tx: unknown) => Promise<unknown>) => Promise<unknown>;
-        }
-      | undefined;
+vi.mock("@/server/db/client", async () => {
+  const real = await import("../../src/server/db/client");
+  return {
+    get db() {
+      const active = harness.activeDb as
+        | {
+            select: (...args: unknown[]) => unknown;
+            insert: (...args: unknown[]) => unknown;
+            update: (...args: unknown[]) => unknown;
+            transaction: (run: (tx: unknown) => Promise<unknown>) => Promise<unknown>;
+          }
+        | undefined;
 
-    if (!active) throw new Error("no active test transaction");
+      if (!active) return real.db;
 
-    return {
-      select: (...args: unknown[]) =>
-        (active.select as (...a: unknown[]) => unknown)(...args),
-      insert: (...args: unknown[]) =>
-        (active.insert as (...a: unknown[]) => unknown)(...args),
-      update: (...args: unknown[]) =>
-        (active.update as (...a: unknown[]) => unknown)(...args),
-      transaction: async (run: (tx: unknown) => Promise<unknown>) => run(active),
-    };
-  },
-  pool: undefined,
-}));
+      return {
+        select: (...args: unknown[]) =>
+          (active.select as (...a: unknown[]) => unknown)(...args),
+        insert: (...args: unknown[]) =>
+          (active.insert as (...a: unknown[]) => unknown)(...args),
+        update: (...args: unknown[]) =>
+          (active.update as (...a: unknown[]) => unknown)(...args),
+        transaction: async (run: (tx: unknown) => Promise<unknown>) => run(active),
+      };
+    },
+    get pool() {
+      return real.pool;
+    },
+  };
+});
 
 vi.mock("next/headers", () => ({
   cookies: async () => ({
@@ -112,8 +121,18 @@ vi.mock("@/server/auth", async () => {
   };
 });
 
+type Context = {
+  organizationId: string;
+  branchId: string;
+  terminalId: string;
+  token: string;
+  email: string;
+  userId: string;
+};
+
 let db: DbClient;
 let pool: typeof import("../../src/server/db/client")["pool"];
+let authPool: typeof import("../../src/server/auth/login-db")["authPool"];
 let hashPassword: (plain: string) => Promise<string>;
 let login: Login;
 let loginAction: LoginAction;
@@ -121,11 +140,21 @@ let resolveTerminal: ResolveTerminal;
 let generateTerminalToken: GenerateTerminalToken;
 let hashTerminalToken: HashTerminalToken;
 let exchangeCode: ExchangeCode;
+const createdContexts: Context[] = [];
+const usedEmailHashes = new Set<string>();
 
 beforeAll(async () => {
+  const databaseName = new URL(process.env.DATABASE_URL ?? "")
+    .pathname.replace(/^\/+/, "")
+    .toLowerCase();
+  if (databaseName !== "pos_test") {
+    throw new Error("Refusing to run: DATABASE_URL must point to pos_test.");
+  }
+
   const client = await import("../../src/server/db/client");
   db = client.db;
   pool = client.pool;
+  ({ authPool } = await import("../../src/server/auth/login-db"));
   ({ hashPassword } = await import("../../src/server/auth/password"));
   ({ login } = await import("../../src/server/auth/login"));
   ({ loginAction } = await import("../../src/app/(auth)/login/actions"));
@@ -139,12 +168,14 @@ beforeAll(async () => {
   ));
 });
 
-afterEach(() => {
+afterEach(async () => {
   harness.cookieToken = undefined;
+  await cleanUp();
 });
 
 afterAll(async () => {
   if (pool) await pool.end();
+  if (authPool) await authPool.end();
 });
 
 async function withRollback(run: (tx: Tx) => Promise<void>): Promise<void> {
@@ -163,6 +194,78 @@ async function withRollback(run: (tx: Tx) => Promise<void>): Promise<void> {
   }
 }
 
+function emailFor(prefix: string): string {
+  return `${prefix}-${randomUUID().replace(/-/g, "")}@example.invalid`;
+}
+
+async function createContext(): Promise<Context> {
+  const organizationId = randomUUID();
+  const branchId = randomUUID();
+  const terminalId = randomUUID();
+  const userId = randomUUID();
+  const token = generateTerminalToken();
+  const email = emailFor("terminal-user");
+  const branchName = `terminal-branch-${randomUUID()}-${String.fromCharCode(65 + (branchCodeSequence++ % 26))}`;
+
+  await db.insert(organizations).values({
+    id: organizationId,
+    name: `Terminal Organization ${randomUUID()}`,
+  });
+  await db.insert(branches).values({
+    id: branchId,
+    organizationId,
+    name: branchName,
+    branchCode: branchCodeFromName(branchName),
+    digitalAddress: randomUUID(),
+    licenceNumber: randomUUID(),
+    licenceExpiresOn: "2030-01-01",
+  });
+  await db.insert(terminals).values({
+    id: terminalId,
+    organizationId,
+    branchId,
+    name: `Terminal ${randomUUID()}`,
+    tokenHash: hashTerminalToken(token),
+  });
+  await db.insert(users).values({
+    id: userId,
+    organizationId,
+    email,
+    fullName: "Terminal Test User",
+    passwordHash: await hashPassword(TEST_PASSWORD),
+  });
+
+  const context = { organizationId, branchId, terminalId, token, email, userId };
+  createdContexts.push(context);
+  usedEmailHashes.add(hashKey(email));
+  return context;
+}
+
+async function attemptEmail(
+  context: Context,
+  email: string,
+  password: string,
+): Promise<Awaited<ReturnType<Login>>> {
+  harness.cookieToken = context.token;
+  usedEmailHashes.add(hashKey(email));
+  return login({ email, password });
+}
+
+async function cleanUp(): Promise<void> {
+  const terminalIds = createdContexts.map((context) => context.terminalId);
+  const keyHashes = [
+    ...usedEmailHashes,
+    ...terminalIds.map((terminalId) => hashKey(terminalId)),
+  ];
+
+  if (keyHashes.length > 0) {
+    await db.delete(loginFailures).where(inArray(loginFailures.keyHash, keyHashes));
+  }
+
+  createdContexts.length = 0;
+  usedEmailHashes.clear();
+}
+
 function sqlState(error: unknown): string | undefined {
   if (typeof error !== "object" || error === null) return undefined;
   const candidate = error as { code?: unknown; cause?: unknown };
@@ -179,17 +282,17 @@ async function captureError(query: Promise<unknown>): Promise<unknown> {
   throw new Error("expected the statement to be rejected");
 }
 
-async function insertOrganization(tx: Tx): Promise<string> {
-  const [row] = await tx
+async function insertOrganization(client: Executor): Promise<string> {
+  const [row] = await client
     .insert(organizations)
     .values({ name: `terminal-org-${randomUUID()}` })
     .returning();
   return row.id;
 }
 
-async function insertBranch(tx: Tx, organizationId: string): Promise<string> {
+async function insertBranch(client: Executor, organizationId: string): Promise<string> {
   const name = `terminal-branch-${randomUUID()}-${String.fromCharCode(65 + (branchCodeSequence++ % 26))}`;
-  const [row] = await tx
+  const [row] = await client
     .insert(branches)
     .values({
       organizationId,
@@ -203,32 +306,15 @@ async function insertBranch(tx: Tx, organizationId: string): Promise<string> {
   return row.id;
 }
 
-async function insertUser(
-  tx: Tx,
-  organizationId: string,
-): Promise<{ id: string; email: string }> {
-  const passwordHash = await hashPassword(TEST_PASSWORD);
-  const [row] = await tx
-    .insert(users)
-    .values({
-      organizationId,
-      email: `terminal-user-${randomUUID()}@example.com`,
-      fullName: "Terminal Test User",
-      passwordHash,
-    })
-    .returning();
-  return { id: row.id, email: row.email };
-}
-
 async function insertTerminal(
-  tx: Tx,
+  client: Executor,
   organizationId: string,
   branchId: string,
   token: string,
   revoked = false,
 ): Promise<{ id: string; tokenHash: string }> {
   const tokenHash = hashTerminalToken(token);
-  const [row] = await tx
+  const [row] = await client
     .insert(terminals)
     .values({
       organizationId,
@@ -242,13 +328,13 @@ async function insertTerminal(
 }
 
 async function insertRegistrationCode(
-  tx: Tx,
+  client: Executor,
   organizationId: string,
   branchId: string,
   code: string,
   expiresAt: Date,
 ): Promise<void> {
-  await tx.insert(terminalRegistrationCodes).values({
+  await client.insert(terminalRegistrationCodes).values({
     organizationId,
     branchId,
     name: `register-${randomUUID()}`,
@@ -431,87 +517,100 @@ describe("terminals", () => {
   });
 
   it("unknown email from registered terminal writes one org/branch/terminal-scoped audit row", async () => {
-    await withRollback(async (tx) => {
-      const organizationId = await insertOrganization(tx);
-      const branchId = await insertBranch(tx, organizationId);
-      const token = generateTerminalToken();
-      const terminal = await insertTerminal(tx, organizationId, branchId, token);
-      harness.cookieToken = token;
-      const email = `nobody-${randomUUID()}@example.com`;
+    const context = await createContext();
+    const organizationId = context.organizationId;
+    const branchId = context.branchId;
+    const terminal = { id: context.terminalId };
+    const email = emailFor("nobody");
 
-      const result = await login({ email, password: TEST_PASSWORD });
+    const result = await attemptEmail(context, email, TEST_PASSWORD);
 
-      expect(result).toEqual({ ok: false });
-      const rows = await tx
-        .select()
-        .from(auditEvents)
-        .where(eq(auditEvents.action, "auth.login_failed"));
-      expect(rows).toHaveLength(1);
-      expect(rows[0].organizationId).toBe(organizationId);
-      expect(rows[0].branchId).toBe(branchId);
-      expect(rows[0].terminalId).toBe(terminal.id);
-      expect(rows[0].actorUserId).toBeNull();
-      expect((rows[0].payload as { reason?: string }).reason).toBe("unknown_email");
-    });
+    expect(result.ok).toBe(false);
+    expect((result as FailedLogin).reason).toBe("bad_credentials");
+    expect((result as FailedLogin).message).toBe("Email or password is incorrect");
+    const rows = await db
+      .select()
+      .from(auditEvents)
+      .where(
+        and(
+          eq(auditEvents.organizationId, organizationId),
+          eq(auditEvents.action, "auth.login_failed"),
+        ),
+      );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].organizationId).toBe(organizationId);
+    expect(rows[0].branchId).toBe(branchId);
+    expect(rows[0].terminalId).toBe(terminal.id);
+    expect(rows[0].actorUserId).toBeNull();
+    expect((rows[0].payload as { reason?: string }).reason).toBe("unknown_email");
   });
 
   it("same unknown email from two terminals branches writes two branch-scoped rows", async () => {
-    await withRollback(async (tx) => {
-      const organizationId = await insertOrganization(tx);
-      const branchOne = await insertBranch(tx, organizationId);
-      const branchTwo = await insertBranch(tx, organizationId);
-      const tokenOne = generateTerminalToken();
-      const tokenTwo = generateTerminalToken();
-      const terminalOne = await insertTerminal(tx, organizationId, branchOne, tokenOne);
-      const terminalTwo = await insertTerminal(tx, organizationId, branchTwo, tokenTwo);
-      const email = `nobody-${randomUUID()}@example.com`;
+    const context = await createContext();
+    const organizationId = context.organizationId;
+    const branchOne = context.branchId;
+    const branchTwo = await insertBranch(db, organizationId);
+    const tokenOne = context.token;
+    const tokenTwo = generateTerminalToken();
+    const terminalOne = { id: context.terminalId };
+    const terminalTwo = await insertTerminal(db, organizationId, branchTwo, tokenTwo);
+    const email = emailFor("nobody");
+    usedEmailHashes.add(hashKey(email));
 
-      harness.cookieToken = tokenOne;
-      await login({ email, password: TEST_PASSWORD });
-      harness.cookieToken = tokenTwo;
-      await login({ email, password: TEST_PASSWORD });
+    harness.cookieToken = tokenOne;
+    await login({ email, password: TEST_PASSWORD });
+    harness.cookieToken = tokenTwo;
+    await login({ email, password: TEST_PASSWORD });
 
-      const rows = await tx
-        .select()
-        .from(auditEvents)
-        .where(eq(auditEvents.action, "auth.login_failed"));
-      expect(rows).toHaveLength(2);
+    const rows = await db
+      .select()
+      .from(auditEvents)
+      .where(
+        and(
+          eq(auditEvents.organizationId, organizationId),
+          eq(auditEvents.action, "auth.login_failed"),
+        ),
+      );
+    expect(rows).toHaveLength(2);
 
-      const byTerminal = new Map(rows.map((row) => [row.terminalId, row]));
-      expect(byTerminal.get(terminalOne.id)).toMatchObject({
-        organizationId,
-        branchId: branchOne,
-      });
-      expect(byTerminal.get(terminalTwo.id)).toMatchObject({
-        organizationId,
-        branchId: branchTwo,
-      });
+    const byTerminal = new Map(rows.map((row) => [row.terminalId, row]));
+    expect(byTerminal.get(terminalOne.id)).toMatchObject({
+      organizationId,
+      branchId: branchOne,
+    });
+    expect(byTerminal.get(terminalTwo.id)).toMatchObject({
+      organizationId,
+      branchId: branchTwo,
     });
   });
 
   it("known user failed login records terminal_id and actor_user_id together", async () => {
-    await withRollback(async (tx) => {
-      const organizationId = await insertOrganization(tx);
-      const branchId = await insertBranch(tx, organizationId);
-      const token = generateTerminalToken();
-      const terminal = await insertTerminal(tx, organizationId, branchId, token);
-      const user = await insertUser(tx, organizationId);
-      harness.cookieToken = token;
+    const context = await createContext();
+    const organizationId = context.organizationId;
+    const branchId = context.branchId;
+    const terminal = { id: context.terminalId };
+    const user = { id: context.userId, email: context.email };
 
-      const result = await login({ email: user.email, password: "wrong-password" });
+    const result = await attemptEmail(context, user.email, "wrong-password");
 
-      expect(result).toEqual({ ok: false });
-      const rows = await tx
-        .select()
-        .from(auditEvents)
-        .where(eq(auditEvents.action, "auth.login_failed"));
-      expect(rows).toHaveLength(1);
-      expect(rows[0].terminalId).toBe(terminal.id);
-      expect(rows[0].actorUserId).toBe(user.id);
-      expect(rows[0].branchId).toBe(branchId);
-      expect(rows[0].organizationId).toBe(organizationId);
-      expect((rows[0].payload as { reason?: string }).reason).toBe("bad_password");
-    });
+    expect(result.ok).toBe(false);
+    expect((result as FailedLogin).reason).toBe("bad_credentials");
+    expect((result as FailedLogin).message).toBe("Email or password is incorrect");
+    const rows = await db
+      .select()
+      .from(auditEvents)
+      .where(
+        and(
+          eq(auditEvents.organizationId, organizationId),
+          eq(auditEvents.action, "auth.login_failed"),
+        ),
+      );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].terminalId).toBe(terminal.id);
+    expect(rows[0].actorUserId).toBe(user.id);
+    expect(rows[0].branchId).toBe(branchId);
+    expect(rows[0].organizationId).toBe(organizationId);
+    expect((rows[0].payload as { reason?: string }).reason).toBe("bad_password");
   });
 
   it("allows exactly one labeled registration console line and no other secret prints", () => {
