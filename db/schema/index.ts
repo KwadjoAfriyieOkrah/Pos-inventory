@@ -3,6 +3,7 @@ export * from "./batches";
 export * from "./branch-sale-counters";
 export * from "./branches";
 export * from "./goods-receipts";
+export * from "./login-failures";
 export * from "./medicines";
 export * from "./organizations";
 export * from "./role-permissions";
