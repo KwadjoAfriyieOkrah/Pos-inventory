@@ -7,6 +7,7 @@ import {
   saleVoids,
   sales,
   stockMovements,
+  users,
 } from "../../../db/schema";
 import { accraToday } from "@/lib/time";
 import { db } from "@/server/db/client";
@@ -338,3 +339,63 @@ export async function approveVoid(
     return { ok: true, voidId: createdDecision.id, status: "completed" };
   });
 }
+
+export type PendingVoid = {
+  voidId: string;
+  saleId: string;
+  saleNumber: string;
+  totalPesewas: number;
+  requesterName: string;
+  reason: string;
+  requestedAt: string;
+};
+
+export async function listPendingVoids(
+  scope: DataScope,
+  access: AuthorizedBranch,
+): Promise<PendingVoid[]> {
+  access = await requireBranch(scope, access.branchId, PERMISSIONS.saleVoid);
+
+  const rows = await db
+    .select({
+      voidId: saleVoids.id,
+      saleId: saleVoids.saleId,
+      saleNumber: sales.saleNumber,
+      totalPesewas: sales.totalPesewas,
+      requesterName: users.fullName,
+      reason: saleVoids.reason,
+      requestedAt: saleVoids.requestedAt,
+    })
+    .from(saleVoids)
+    .innerJoin(
+      sales,
+      and(
+        eq(sales.id, saleVoids.saleId),
+        eq(sales.organizationId, saleVoids.organizationId),
+        eq(sales.branchId, saleVoids.branchId),
+      ),
+    )
+    .innerJoin(
+      users,
+      and(
+        eq(users.id, saleVoids.requestedBy),
+        eq(users.organizationId, saleVoids.organizationId),
+      ),
+    )
+    .where(
+      and(
+        eq(saleVoids.status, "pending_approval"),
+        isNull(saleVoids.decisionFor),
+        eq(saleVoids.organizationId, access.organizationId),
+        eq(saleVoids.branchId, access.branchId),
+      ),
+    )
+    .orderBy(asc(saleVoids.requestedAt))
+    .limit(100);
+
+  return rows.map((row) => ({
+    ...row,
+    requestedAt: row.requestedAt.toISOString(),
+  }));
+}
+

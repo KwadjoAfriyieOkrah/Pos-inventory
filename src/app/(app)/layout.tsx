@@ -4,6 +4,7 @@ import { connection } from "next/server";
 import { AppShell } from "@/features/shell/AppShell";
 import { SignOutButton } from "@/features/shell/SignOutButton";
 import { auth } from "@/server/auth";
+import { loadScope } from "@/server/auth/scope";
 
 async function SignedInShell({ children }: { children: ReactNode }) {
   await connection();
@@ -18,8 +19,20 @@ async function SignedInShell({ children }: { children: ReactNode }) {
     throw new Error("Authenticated session is missing the user's email.");
   }
 
+  const scope = await loadScope(
+    session.user.id,
+    session.user.organizationId,
+  );
+  const permissions = [
+    ...new Set([...scope.branches.values()].flatMap((branch) => [...branch])),
+  ];
+
   return (
-    <AppShell email={session.user.email} signOutButton={<SignOutButton />}>
+    <AppShell
+      email={session.user.email}
+      permissions={permissions}
+      signOutButton={<SignOutButton />}
+    >
       {children}
     </AppShell>
   );

@@ -9,15 +9,25 @@ type AppShellProps = {
   children: ReactNode;
   email: string;
   signOutButton: ReactNode;
+  permissions: readonly string[];
 };
 
-function Navigation({ mobile = false }: { mobile?: boolean }) {
+function Navigation({
+  mobile = false,
+  permissions,
+}: {
+  mobile?: boolean;
+  permissions: readonly string[];
+}) {
   const pathname = usePathname();
+  const items = NAV_ITEMS.filter(
+    (item) => !("permission" in item) || permissions.includes(item.permission),
+  );
 
   return (
     <nav aria-label="Primary navigation">
       <ul className={mobile ? "grid grid-cols-3 gap-1" : "space-y-2"}>
-        {NAV_ITEMS.map((item, index) => {
+        {items.map((item, index) => {
           const active =
             pathname === item.href || pathname.startsWith(`${item.href}/`);
 
@@ -50,7 +60,12 @@ function Navigation({ mobile = false }: { mobile?: boolean }) {
   );
 }
 
-export function AppShell({ children, email, signOutButton }: AppShellProps) {
+export function AppShell({
+  children,
+  email,
+  signOutButton,
+  permissions,
+}: AppShellProps) {
   return (
     <div className="min-h-screen bg-[#f6f6f1] text-stone-950 md:flex">
       <aside className="hidden w-72 shrink-0 flex-col border-r border-stone-200 bg-[#efefe8] px-6 py-7 md:flex">
@@ -72,7 +87,7 @@ export function AppShell({ children, email, signOutButton }: AppShellProps) {
         <p className="mb-3 px-3 text-[10px] font-semibold uppercase tracking-[0.2em] text-stone-400">
           Workspace
         </p>
-        <Navigation />
+        <Navigation permissions={permissions} />
 
         <div className="mt-auto border-t border-stone-300 pt-5">
           <p className="text-xs leading-relaxed text-stone-500">
@@ -100,7 +115,7 @@ export function AppShell({ children, email, signOutButton }: AppShellProps) {
       </div>
 
       <div className="fixed inset-x-0 bottom-0 z-10 border-t border-stone-200 bg-[#f6f6f1]/95 px-3 pb-[env(safe-area-inset-bottom)] pt-2 backdrop-blur md:hidden">
-        <Navigation mobile />
+        <Navigation mobile permissions={permissions} />
       </div>
     </div>
   );
