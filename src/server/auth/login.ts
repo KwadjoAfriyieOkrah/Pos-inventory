@@ -62,6 +62,20 @@ function fail(reason: LoginReason): LoginResult {
   return { ok: false, reason, message: LOGIN_MESSAGES[reason] };
 }
 
+const FINALIZE_ATTEMPTS = 3;
+const FINALIZE_RETRY_DELAYS_MS = [0, 100, 300];
+const TRANSIENT_SQLSTATES = new Set([
+  "55P03",
+  "40P01",
+  "08006",
+  "08001",
+  "57P01",
+]);
+
+function sleep(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
 const credentialsSchema = z.object({
   email: z.string().email().max(254).transform((email) => email.toLowerCase()),
   password: z.string().min(8).max(128),
@@ -282,57 +296,75 @@ export async function login(input: unknown): Promise<LoginResult> {
     const authenticated = Boolean(user && passwordMatches && user.isActive);
 
     // Login is refused when the audit write fails; this is deliberate.
-    try {
-      await authDb.transaction(async (tx) => {
-        await finalizeReservations(
-          tx,
-          reservation.ids,
-          authenticated ? "succeeded" : "failed",
-        );
+    let finalized = false;
+    for (
+      let attempt = 0;
+      attempt < FINALIZE_ATTEMPTS && !finalized;
+      attempt += 1
+    ) {
+      if (attempt > 0) {
+        await sleep(FINALIZE_RETRY_DELAYS_MS[attempt]);
+      }
 
-        if (!authenticated && !user) {
-          await tx.insert(auditEvents).values({
-            organizationId: terminal.organizationId,
-            branchId: terminal.branchId,
-            terminalId: terminal.id,
-            actorUserId: null,
-            action: "auth.login_failed",
-            entityType: "user",
-            payload: { reason: "unknown_email", attempted_email: email },
-          });
-        } else if (!authenticated && user) {
-          const reason = !user.isActive
-            ? passwordMatches
-              ? "inactive"
-              : "inactive_and_bad_password"
-            : "bad_password";
+      try {
+        await authDb.transaction(async (tx) => {
+          await finalizeReservations(
+            tx,
+            reservation.ids,
+            authenticated ? "succeeded" : "failed",
+          );
 
-          await tx.insert(auditEvents).values({
-            organizationId: terminal.organizationId,
-            branchId: terminal.branchId,
-            terminalId: terminal.id,
-            actorUserId: user.id,
-            action: "auth.login_failed",
-            entityType: "user",
-            entityId: user.id,
-            payload: { reason },
-          });
-        } else if (user) {
-          await tx.insert(auditEvents).values({
-            organizationId: terminal.organizationId,
-            branchId: terminal.branchId,
-            terminalId: terminal.id,
-            actorUserId: user.id,
-            action: "auth.login_succeeded",
-            entityType: "user",
-            entityId: user.id,
-            payload: {},
-          });
+          if (!authenticated && !user) {
+            await tx.insert(auditEvents).values({
+              organizationId: terminal.organizationId,
+              branchId: terminal.branchId,
+              terminalId: terminal.id,
+              actorUserId: null,
+              action: "auth.login_failed",
+              entityType: "user",
+              payload: { reason: "unknown_email", attempted_email: email },
+            });
+          } else if (!authenticated && user) {
+            const reason = !user.isActive
+              ? passwordMatches
+                ? "inactive"
+                : "inactive_and_bad_password"
+              : "bad_password";
+
+            await tx.insert(auditEvents).values({
+              organizationId: terminal.organizationId,
+              branchId: terminal.branchId,
+              terminalId: terminal.id,
+              actorUserId: user.id,
+              action: "auth.login_failed",
+              entityType: "user",
+              entityId: user.id,
+              payload: { reason },
+            });
+          } else if (user) {
+            await tx.insert(auditEvents).values({
+              organizationId: terminal.organizationId,
+              branchId: terminal.branchId,
+              terminalId: terminal.id,
+              actorUserId: user.id,
+              action: "auth.login_succeeded",
+              entityType: "user",
+              entityId: user.id,
+              payload: {},
+            });
+          }
+        });
+        finalized = true;
+      } catch (error) {
+        const errorCode = databaseErrorCode(error);
+        if (
+          !TRANSIENT_SQLSTATES.has(errorCode) ||
+          attempt === FINALIZE_ATTEMPTS - 1
+        ) {
+          console.error(errorCode);
+          return fail("unavailable");
         }
-      });
-    } catch (error) {
-      console.error(databaseErrorCode(error));
-      return fail("unavailable");
+      }
     }
 
     if (!authenticated || !user) return fail("bad_credentials");

@@ -17,6 +17,7 @@ import {
   terminals,
   users,
 } from "../../db/schema";
+import { authDb } from "../../src/server/auth/login-db";
 import {
   EMAIL_LIMIT,
   EMAIL_WINDOW_MINUTES,
@@ -393,4 +394,88 @@ describe("login rate limiting", () => {
       errorSpy.mockRestore();
     }
   }, 60000);
+
+  it("retries a transient finalize error once and returns ok:true with one finalized set", async () => {
+    const context = await createContext();
+    const suffix = randomUUID().replace(/-/g, "");
+    const sequenceName = `finalize_transient_${suffix}`;
+    const functionName = `finalize_transient_${suffix}`;
+    const triggerName = `finalize_transient_${suffix}`;
+    let result: LoginResult | undefined;
+
+    try {
+      await db.execute(sql.raw(`CREATE SEQUENCE ${sequenceName} START 1`));
+      await db.execute(
+        sql.raw(
+          `CREATE FUNCTION ${functionName}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.status = 'succeeded' AND nextval('${sequenceName}') = 1 THEN RAISE EXCEPTION 'simulated transient finalize failure' USING ERRCODE = '55P03'; END IF; RETURN NEW; END; $$`,
+        ),
+      );
+      await db.execute(
+        sql.raw(
+          `CREATE TRIGGER ${triggerName} BEFORE UPDATE ON login_failures FOR EACH ROW EXECUTE FUNCTION ${functionName}();`,
+        ),
+      );
+      result = await attempt(context, harness.correctPassword);
+    } finally {
+      await db.execute(sql.raw(`DROP TRIGGER IF EXISTS ${triggerName} ON login_failures;`));
+      await db.execute(sql.raw(`DROP FUNCTION IF EXISTS ${functionName}();`));
+      await db.execute(sql.raw(`DROP SEQUENCE IF EXISTS ${sequenceName};`));
+    }
+
+    const emailRows = await emailStatusRows(db, context.email);
+    const terminalRows = await db
+      .select({ id: loginFailures.id, status: loginFailures.status })
+      .from(loginFailures)
+      .where(
+        and(
+          eq(loginFailures.keyType, "terminal"),
+          eq(loginFailures.keyHash, hashKey(context.terminalId)),
+        ),
+      );
+    const observed = `emailRows=${emailRows.length} terminalRows=${terminalRows.length}`;
+
+    expect(result?.ok, observed).toBe(true);
+    expect(emailRows, observed).toHaveLength(1);
+    expect(emailRows[0]?.status, observed).toBe("succeeded");
+    expect(terminalRows, observed).toHaveLength(1);
+    expect(terminalRows[0]?.status, observed).toBe("succeeded");
+  });
+
+  it("fails on the first attempt without retry for a non-transient finalize error", async () => {
+    const context = await createContext();
+    const suffix = randomUUID().replace(/-/g, "");
+    const functionName = `finalize_fatal_${suffix}`;
+    const triggerName = `finalize_fatal_${suffix}`;
+    const transactionSpy = vi.spyOn(authDb, "transaction");
+    let result: LoginResult | undefined;
+    let transactionCalls = 0;
+
+    try {
+      await db.execute(
+        sql.raw(
+          `CREATE FUNCTION ${functionName}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.status = 'failed' THEN RAISE EXCEPTION 'simulated non-transient finalize failure' USING ERRCODE = '22023'; END IF; RETURN NEW; END; $$`,
+        ),
+      );
+      await db.execute(
+        sql.raw(
+          `CREATE TRIGGER ${triggerName} BEFORE UPDATE ON login_failures FOR EACH ROW EXECUTE FUNCTION ${functionName}();`,
+        ),
+      );
+      harness.verifyPassword.mockClear();
+      result = await attempt(context, harness.wrongPassword);
+    } finally {
+      transactionCalls = transactionSpy.mock.calls.length;
+      await db.execute(sql.raw(`DROP TRIGGER IF EXISTS ${triggerName} ON login_failures;`));
+      await db.execute(sql.raw(`DROP FUNCTION IF EXISTS ${functionName}();`));
+      transactionSpy.mockRestore();
+    }
+
+    const checks = harness.verifyPassword.mock.calls.length;
+    const observed = `transactions=${transactionCalls} checks=${checks}`;
+
+    expect(result?.ok, observed).toBe(false);
+    expect(reasonOf(result as LoginResult), observed).toBe("unavailable");
+    expect(transactionCalls, observed).toBe(2);
+    expect(checks, observed).toBe(1);
+  });
 });
