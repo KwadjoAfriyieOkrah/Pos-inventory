@@ -10,9 +10,9 @@ export const authPool = new Pool({
 });
 
 authPool.on("error", (error) => {
-  const code =
+  const sqlstate =
     "code" in error && typeof error.code === "string" ? error.code : "unknown";
-  console.error(code);
+  console.error("Auth pool error:", sqlstate);
 });
 
 export const authDb = drizzle(authPool);
