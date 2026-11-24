@@ -22,6 +22,7 @@ import {
   userBranchAssignments,
   users,
 } from "../../db/schema";
+import { branchCodeFromName } from "../../src/lib/sale-number";
 import {
   FORBIDDEN_MESSAGE,
   ForbiddenError,
@@ -39,6 +40,9 @@ type ListTerminals = typeof import("../../src/server/data/terminals")["listTermi
 type DataScope = import("../../src/server/data/scope").DataScope;
 
 const ROLLBACK = Symbol("rollback");
+
+let branchCodeSequence = 0;
+
 const harness = vi.hoisted(() => ({
   activeDb: undefined as unknown,
 }));
@@ -136,11 +140,13 @@ async function insertOrganization(tx: Tx): Promise<string> {
 }
 
 async function insertBranch(tx: Tx, organizationId: string): Promise<string> {
+  const name = `scope-branch-${randomUUID()}-${String.fromCharCode(65 + (branchCodeSequence++ % 26))}`;
   const [row] = await tx
     .insert(branches)
     .values({
       organizationId,
-      name: `scope-branch-${randomUUID()}`,
+      name,
+      branchCode: branchCodeFromName(name),
       digitalAddress: `addr-${randomUUID()}`,
       licenceNumber: randomUUID(),
       licenceExpiresOn: "2030-12-31",

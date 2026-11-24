@@ -21,6 +21,7 @@ import {
   users,
 } from "../../db/schema";
 import { accraToday } from "../../src/lib/time";
+import { branchCodeFromName, nextSaleNumber } from "../../src/lib/sale-number";
 import {
   FORBIDDEN_MESSAGE,
   ForbiddenError,
@@ -65,6 +66,8 @@ let listSaleCashiers: ListSaleCashiers;
 let getSaleDetail: GetSaleDetail;
 
 const TODAY = accraToday();
+
+let branchCodeSequence = 0;
 
 function dateDaysBefore(days: number): string {
   const value = new Date(`${TODAY}T00:00:00.000Z`);
@@ -148,11 +151,14 @@ async function createFixture(): Promise<Fixture> {
 
   const branchAId = randomUUID();
   const branchBId = randomUUID();
+  const branchAName = `sales-history-a-${randomUUID()}-${String.fromCharCode(65 + (branchCodeSequence++ % 26))}`;
+  const branchBName = `sales-history-b-${randomUUID()}-${String.fromCharCode(65 + (branchCodeSequence++ % 26))}`;
   await db.insert(branches).values([
     {
       id: branchAId,
       organizationId,
-      name: `sales-history-a-${randomUUID()}`,
+      name: branchAName,
+      branchCode: branchCodeFromName(branchAName),
       digitalAddress: `sales-history-addr-a-${randomUUID()}`,
       licenceNumber: randomUUID(),
       licenceExpiresOn: "2030-12-31",
@@ -160,7 +166,8 @@ async function createFixture(): Promise<Fixture> {
     {
       id: branchBId,
       organizationId,
-      name: `sales-history-b-${randomUUID()}`,
+      name: branchBName,
+      branchCode: branchCodeFromName(branchBName),
       digitalAddress: `sales-history-addr-b-${randomUUID()}`,
       licenceNumber: randomUUID(),
       licenceExpiresOn: "2030-12-31",
@@ -367,12 +374,19 @@ async function seedSale(
   }
 
   const saleId = randomUUID();
+  const saleNumber = await nextSaleNumber(
+    db,
+    fixture.organizationId,
+    options.branchId,
+    accraToday(options.createdAt),
+  );
   await db.insert(sales).values({
     id: saleId,
     organizationId: fixture.organizationId,
     branchId: options.branchId,
     cashierId: options.cashierId,
     idempotencyKey: `sales-history-${randomUUID()}`,
+    saleNumber,
     totalPesewas,
     paymentMethod: options.paymentMethod,
     createdAt: options.createdAt,

@@ -243,6 +243,7 @@ export async function listSales(
   const rows = await db
     .select({
       saleId: sales.id,
+      saleNumber: sales.saleNumber,
       createdAt: sales.createdAt,
       cursorTimestamp: sql<string>`to_char(${sales.createdAt} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`,
       cashierName: users.fullName,
@@ -288,7 +289,7 @@ export async function listSales(
 
     return {
       saleId: row.saleId,
-      saleNumber: row.saleId,
+      saleNumber: row.saleNumber,
       createdAt: row.createdAt.toISOString(),
       cashierName: row.cashierName,
       totalPesewas,
@@ -359,6 +360,7 @@ export async function getSaleDetail(
   const [saleHeader] = await db
     .select({
       saleId: sales.id,
+      saleNumber: sales.saleNumber,
       branchId: sales.branchId,
       branchName: branches.name,
       createdAt: sales.createdAt,
@@ -443,7 +445,7 @@ export async function getSaleDetail(
   return {
     sale: {
       saleId: saleHeader.saleId,
-      saleNumber: saleHeader.saleId,
+      saleNumber: saleHeader.saleNumber,
       createdAt: saleHeader.createdAt.toISOString(),
       cursorTimestamp: saleHeader.cursorTimestamp,
       cashierName: saleHeader.cashierName,

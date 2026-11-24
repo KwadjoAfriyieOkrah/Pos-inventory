@@ -19,6 +19,7 @@ import {
   users,
 } from "../../db/schema";
 import { accraToday } from "../../src/lib/time";
+import { branchCodeFromName } from "../../src/lib/sale-number";
 import { PERMISSIONS } from "../../src/server/data/permissions";
 
 loadDotenv({ path: ".env.local", quiet: true });
@@ -50,6 +51,7 @@ vi.mock("@/lib/env", async () => {
 });
 vi.mock("@/lib/time", async () => await import("../../src/lib/time"));
 vi.mock("@/lib/money", async () => await import("../../src/lib/money"));
+vi.mock("@/lib/sale-number", async () => await import("../../src/lib/sale-number"));
 vi.mock("@/server/db/client", async () => await import("../../src/server/db/client"));
 
 let db: DbClient;
@@ -68,6 +70,8 @@ function daysFromToday(days: number): string {
 const FUTURE_EXPIRY = daysFromToday(30);
 const LATER_EXPIRY = daysFromToday(60);
 const EXPIRED_EXPIRY = daysFromToday(-1);
+
+let branchCodeSequence = 0;
 
 beforeAll(async () => {
   const client = await import("../../src/server/db/client");
@@ -120,10 +124,12 @@ async function createFixture(): Promise<Fixture> {
   });
 
   const branchId = randomUUID();
+  const branchName = `sales-branch-${randomUUID()}-${String.fromCharCode(65 + (branchCodeSequence++ % 26))}`;
   await db.insert(branches).values({
     id: branchId,
     organizationId,
-    name: `sales-branch-${randomUUID()}`,
+    name: branchName,
+    branchCode: branchCodeFromName(branchName),
     digitalAddress: `sales-addr-${randomUUID()}`,
     licenceNumber: randomUUID(),
     licenceExpiresOn: "2030-12-31",

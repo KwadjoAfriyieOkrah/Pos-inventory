@@ -20,6 +20,7 @@ import {
   terminals,
   users,
 } from "../../db/schema";
+import { branchCodeFromName } from "../../src/lib/sale-number";
 
 loadDotenv({ path: ".env.local", quiet: true });
 
@@ -37,6 +38,8 @@ const ROLLBACK = Symbol("rollback");
 const INVALID_CODE_MESSAGE = "Registration code is not valid.";
 const UNREGISTERED_TERMINAL_MESSAGE =
   "This device is not registered. Contact the pharmacy owner.";
+
+let branchCodeSequence = 0;
 
 const harness = vi.hoisted(() => ({
   activeDb: undefined as unknown,
@@ -185,11 +188,13 @@ async function insertOrganization(tx: Tx): Promise<string> {
 }
 
 async function insertBranch(tx: Tx, organizationId: string): Promise<string> {
+  const name = `terminal-branch-${randomUUID()}-${String.fromCharCode(65 + (branchCodeSequence++ % 26))}`;
   const [row] = await tx
     .insert(branches)
     .values({
       organizationId,
-      name: `terminal-branch-${randomUUID()}`,
+      name,
+      branchCode: branchCodeFromName(name),
       digitalAddress: `addr-${randomUUID()}`,
       licenceNumber: randomUUID(),
       licenceExpiresOn: "2030-12-31",

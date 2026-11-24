@@ -14,6 +14,7 @@ import {
   users,
 } from "../../db/schema";
 import { DEFAULT_ROLE_PERMISSIONS } from "../../db/seed/default-role-permissions";
+import { branchCodeFromName } from "../../src/lib/sale-number";
 import { ForbiddenError } from "../../src/server/data/errors";
 import { PERMISSIONS } from "../../src/server/data/permissions";
 
@@ -36,6 +37,8 @@ let db: DbClient;
 let pool: Pool;
 let loadScope: LoadScope;
 let requireBranch: RequireBranch;
+
+let branchCodeSequence = 0;
 
 function checkListValues(): string[] {
   const path = join(process.cwd(), "db", "schema", "role-permissions.ts");
@@ -132,11 +135,13 @@ async function createFixture(): Promise<Fixture> {
     .insert(organizations)
     .values({ name: `permissions-org-${randomUUID()}` })
     .returning();
+  const branchName = `permissions-branch-${randomUUID()}-${String.fromCharCode(65 + (branchCodeSequence++ % 26))}`;
   const [branch] = await db
     .insert(branches)
     .values({
       organizationId: organization.id,
-      name: `permissions-branch-${randomUUID()}`,
+      name: branchName,
+      branchCode: branchCodeFromName(branchName),
       digitalAddress: `addr-${randomUUID()}`,
       licenceNumber: randomUUID(),
       licenceExpiresOn: "2030-12-31",

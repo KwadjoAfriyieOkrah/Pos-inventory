@@ -9,6 +9,7 @@ export const branches = pgTable(
       .notNull()
       .references(() => organizations.id),
     name: text("name").notNull(),
+    branchCode: text("branch_code").notNull(),
     digitalAddress: text("digital_address").notNull(),
     phone: text("phone"),
     licenceNumber: text("licence_number").notNull(),
@@ -19,6 +20,10 @@ export const branches = pgTable(
   },
   (table) => [
     unique("branches_licence_number_unique").on(table.licenceNumber),
+    unique("branches_organization_id_branch_code_unique").on(
+      table.organizationId,
+      table.branchCode,
+    ),
     unique("branches_id_organization_id_unique").on(
       table.id,
       table.organizationId,

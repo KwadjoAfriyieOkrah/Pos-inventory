@@ -17,6 +17,7 @@ import {
   userBranchAssignments,
   users,
 } from "../../db/schema";
+import { branchCodeFromName } from "../../src/lib/sale-number";
 import { accraToday } from "../../src/lib/time";
 import {
   FORBIDDEN_MESSAGE,
@@ -78,6 +79,8 @@ function daysAfterToday(days: number): string {
 const FUTURE_EXPIRY = daysAfterToday(30);
 const ALTERNATE_EXPIRY = daysAfterToday(31);
 
+let branchCodeSequence = 0;
+
 beforeAll(async () => {
   const client = await import("../../src/server/db/client");
   db = client.db;
@@ -131,10 +134,12 @@ async function createOrganization(): Promise<string> {
 
 async function createBranch(organizationId: string, label: string): Promise<string> {
   const branchId = randomUUID();
+  const name = `receiving-${label}-${randomUUID()}-${String.fromCharCode(65 + (branchCodeSequence++ % 26))}`;
   await db.insert(branches).values({
     id: branchId,
     organizationId,
-    name: `receiving-${label}-${randomUUID()}`,
+    name,
+    branchCode: branchCodeFromName(name),
     digitalAddress: `receiving-addr-${randomUUID()}`,
     licenceNumber: randomUUID(),
     licenceExpiresOn: "2030-12-31",

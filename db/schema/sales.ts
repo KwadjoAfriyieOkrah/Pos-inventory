@@ -26,6 +26,7 @@ export const sales = pgTable(
     branchId: uuid("branch_id").notNull(),
     cashierId: uuid("cashier_id").notNull(),
     idempotencyKey: text("idempotency_key").notNull(),
+    saleNumber: text("sale_number").notNull(),
     totalPesewas: bigint("total_pesewas", { mode: "number" }).notNull(),
     paymentMethod: text("payment_method").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true })
@@ -46,6 +47,10 @@ export const sales = pgTable(
     unique("sales_branch_idempotency_key_unique").on(
       table.branchId,
       table.idempotencyKey,
+    ),
+    unique("sales_branch_id_sale_number_unique").on(
+      table.branchId,
+      table.saleNumber,
     ),
     check(
       "sales_total_pesewas_check",

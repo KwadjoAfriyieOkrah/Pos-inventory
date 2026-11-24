@@ -19,6 +19,7 @@ import {
   users,
 } from "../../db/schema";
 import { accraToday } from "../../src/lib/time";
+import { branchCodeFromName, nextSaleNumber } from "../../src/lib/sale-number";
 import {
   FORBIDDEN_MESSAGE,
   ForbiddenError,
@@ -91,6 +92,8 @@ let listSaleableMedicines: ListSaleableMedicines;
 let listBranchBatches: ListBranchBatches;
 let branchDashboard: BranchDashboard;
 
+let branchCodeSequence = 0;
+
 beforeAll(async () => {
   const client = await import("../../src/server/db/client");
   db = client.db;
@@ -155,10 +158,12 @@ async function insertBranch(
   label: string,
 ): Promise<string> {
   const branchId = randomUUID();
+  const name = `read-path-${label}-${randomUUID()}-${String.fromCharCode(65 + (branchCodeSequence++ % 26))}`;
   await tx.insert(branches).values({
     id: branchId,
     organizationId,
-    name: `read-path-${label}-${randomUUID()}`,
+    name,
+    branchCode: branchCodeFromName(name),
     digitalAddress: `read-path-addr-${randomUUID()}`,
     licenceNumber: randomUUID(),
     licenceExpiresOn: "2030-12-31",
@@ -266,12 +271,19 @@ async function insertSale(
   },
 ): Promise<string> {
   const saleId = randomUUID();
+  const saleNumber = await nextSaleNumber(
+    tx,
+    input.organizationId,
+    input.branchId,
+    accraToday(input.createdAt),
+  );
   await tx.insert(sales).values({
     id: saleId,
     organizationId: input.organizationId,
     branchId: input.branchId,
     cashierId: input.cashierId,
     idempotencyKey: randomUUID(),
+    saleNumber,
     totalPesewas: input.totalPesewas,
     paymentMethod: "cash",
     createdAt: input.createdAt,

@@ -15,6 +15,7 @@ import {
   userBranchAssignments,
   users,
 } from "../../db/schema";
+import { branchCodeFromName } from "../../src/lib/sale-number";
 
 loadDotenv({ path: ".env.local", quiet: true });
 
@@ -25,6 +26,8 @@ let db: DbClient;
 let pool: typeof import("../../src/server/db/client")["pool"];
 
 const ROLLBACK = Symbol("rollback");
+
+let branchCodeSequence = 0;
 
 vi.mock("server-only", () => ({}));
 vi.mock("@/lib/env", async () => {
@@ -102,11 +105,13 @@ async function insertRole(tx: Tx, organizationId: string): Promise<string> {
 }
 
 async function insertBranch(tx: Tx, organizationId: string, licenceNumber = randomUUID()) {
+  const name = `branch-${randomUUID()}-${String.fromCharCode(65 + (branchCodeSequence++ % 26))}`;
   const [row] = await tx
     .insert(branches)
     .values({
       organizationId,
-      name: `branch-${randomUUID()}`,
+      name,
+      branchCode: branchCodeFromName(name),
       digitalAddress: `addr-${randomUUID()}`,
       licenceNumber,
       licenceExpiresOn: "2030-12-31",

@@ -22,6 +22,7 @@ import {
 import { DEMO_CATALOG } from "../src/features/demo/catalog";
 import { DEMO_STOCK_BATCHES } from "../src/features/demo/stock";
 import { DEMO_BRANCHES } from "../src/features/demo/dashboard";
+import { branchCodeFromName, nextSaleNumber } from "../src/lib/sale-number";
 
 config({ path: resolve(process.cwd(), ".env.local"), quiet: true });
 
@@ -132,6 +133,7 @@ console.error(`Demo seed database error: ${sqlstate}`);
           .values({
             organizationId: organization.id,
             name,
+            branchCode: branchCodeFromName(name),
             digitalAddress: "GA-000-0000",
             licenceNumber,
             licenceExpiresOn: "2030-12-31",
@@ -281,6 +283,7 @@ console.error(`Demo seed database error: ${sqlstate}`);
             organizationId: organization.id,
             name: medicine.name,
             dosageForm: medicine.dosageForm,
+            classification: "OTC",
             unitPricePesewas: medicine.unitPricePesewas,
           })),
         )
@@ -415,6 +418,12 @@ console.error(`Demo seed database error: ${sqlstate}`);
 
           let saleId = existingSale?.id;
           if (!saleId) {
+            const saleNumber = await nextSaleNumber(
+              tx,
+              organization.id,
+              demoBranch.id,
+              accraDate,
+            );
             const [insertedSale] = await tx
               .insert(sales)
               .values({
@@ -422,6 +431,7 @@ console.error(`Demo seed database error: ${sqlstate}`);
                 branchId: demoBranch.id,
                 cashierId: cashierId,
                 idempotencyKey: key,
+                saleNumber,
                 totalPesewas: saleTotal,
                 paymentMethod: index % 5 === 4 ? "momo" : "cash",
                 createdAt: new Date(`${accraDate}T12:00:00.000Z`),

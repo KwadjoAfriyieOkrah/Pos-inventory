@@ -1,5 +1,6 @@
 export * from "./audit-events";
 export * from "./batches";
+export * from "./branch-sale-counters";
 export * from "./branches";
 export * from "./goods-receipts";
 export * from "./medicines";

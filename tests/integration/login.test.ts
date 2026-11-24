@@ -5,6 +5,7 @@ import { and, eq } from "drizzle-orm";
 import { config as loadDotenv } from "dotenv";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { auditEvents, branches, organizations, terminals, users } from "../../db/schema";
+import { branchCodeFromName } from "../../src/lib/sale-number";
 
 loadDotenv({ path: ".env.local", quiet: true });
 
@@ -19,6 +20,8 @@ const TEST_PASSWORD = "correct horse battery staple";
 const WRONG_PASSWORD = "wrong horse battery staple";
 const ROLLBACK = Symbol("rollback");
 const ERROR_MESSAGE = "Email or password is incorrect";
+
+let branchCodeSequence = 0;
 const UNREGISTERED_TERMINAL_MESSAGE =
   "This device is not registered. Contact the pharmacy owner.";
 
@@ -161,11 +164,13 @@ async function insertOrganization(tx: Tx): Promise<string> {
 }
 
 async function insertBranch(tx: Tx, organizationId: string): Promise<string> {
+  const name = `login-branch-${randomUUID()}-${String.fromCharCode(65 + (branchCodeSequence++ % 26))}`;
   const [branch] = await tx
     .insert(branches)
     .values({
       organizationId,
-      name: `login-branch-${randomUUID()}`,
+      name,
+      branchCode: branchCodeFromName(name),
       digitalAddress: `addr-${randomUUID()}`,
       licenceNumber: randomUUID(),
       licenceExpiresOn: "2030-12-31",

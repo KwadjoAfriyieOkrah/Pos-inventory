@@ -12,6 +12,7 @@ import {
 } from "../../../db/schema";
 import { accraToday } from "@/lib/time";
 import { toPesewas } from "@/lib/money";
+import { nextSaleNumber } from "@/lib/sale-number";
 import { db } from "@/server/db/client";
 import { PERMISSIONS } from "./permissions";
 import {
@@ -266,6 +267,14 @@ export async function completeSale(
       }
     }
 
+    const today = accraToday();
+    const saleNumber = await nextSaleNumber(
+      tx,
+      access.organizationId,
+      access.branchId,
+      today,
+    );
+
     const [createdSale] = await tx
       .insert(sales)
       .values({
@@ -273,6 +282,7 @@ export async function completeSale(
         branchId: access.branchId,
         cashierId: scope.userId,
         idempotencyKey: key.data,
+        saleNumber,
         totalPesewas,
         paymentMethod: parsed.data.paymentMethod,
       })
@@ -306,7 +316,6 @@ export async function completeSale(
       lineTotalPesewas: number;
       quantityOnHand: number;
     }[] = [];
-    const today = accraToday();
 
     for (const line of requestedLines) {
       const medicine = medicineById.get(line.medicineId);
