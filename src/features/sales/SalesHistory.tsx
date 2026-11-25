@@ -75,6 +75,7 @@ export function SalesHistory({
 
       <form
         className="mb-7 grid gap-3 border-y border-stone-200 py-5 sm:grid-cols-2 lg:grid-cols-[1fr_1fr_1fr_1.2fr_auto_auto]"
+        key={`${filters.fromDate}|${filters.toDate}|${filters.paymentMethod}|${filters.cashierId}`}
         method="get"
       >
         <label className="text-xs font-medium text-stone-600">
@@ -83,7 +84,7 @@ export function SalesHistory({
             className="mt-1 min-h-11 w-full rounded-lg border border-stone-300 bg-white/70 px-3 text-sm text-stone-900"
             name="fromDate"
             type="date"
-            value={filters.fromDate}
+            defaultValue={filters.fromDate}
           />
         </label>
         <label className="text-xs font-medium text-stone-600">
@@ -92,7 +93,7 @@ export function SalesHistory({
             className="mt-1 min-h-11 w-full rounded-lg border border-stone-300 bg-white/70 px-3 text-sm text-stone-900"
             name="toDate"
             type="date"
-            value={filters.toDate}
+            defaultValue={filters.toDate}
           />
         </label>
         <label className="text-xs font-medium text-stone-600">
@@ -100,7 +101,7 @@ export function SalesHistory({
           <select
             className="mt-1 min-h-11 w-full rounded-lg border border-stone-300 bg-white/70 px-3 text-sm text-stone-900"
             name="paymentMethod"
-            value={filters.paymentMethod}
+            defaultValue={filters.paymentMethod}
           >
             <option value="">All methods</option>
             <option value="cash">Cash</option>
@@ -112,7 +113,7 @@ export function SalesHistory({
           <select
             className="mt-1 min-h-11 w-full rounded-lg border border-stone-300 bg-white/70 px-3 text-sm text-stone-900"
             name="cashierId"
-            value={filters.cashierId}
+            defaultValue={filters.cashierId}
           >
             <option value="">All cashiers</option>
             {cashiers.map((cashier) => (
