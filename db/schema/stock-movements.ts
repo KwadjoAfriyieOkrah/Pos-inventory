@@ -46,7 +46,7 @@ export const stockMovements = pgTable(
     }),
     check(
       "stock_movements_movement_type_check",
-      sql`${table.movementType} in ('receipt', 'sale', 'adjustment')`,
+      sql`${table.movementType} in ('receipt', 'sale', 'adjustment', 'reversal')`,
     ),
     check(
       "stock_movements_quantity_delta_check",
