@@ -45,7 +45,10 @@ async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const branchId = args[args.indexOf("--branch-id") + 1];
   const branchIdResult = z.string().uuid().safeParse(branchId);
-  if (!branchIdResult.success) fail();
+  if (!branchIdResult.success) {
+    console.error("Usage: npm run records:export -- --branch-id <uuid>");
+    process.exit(2);
+  }
 
   const databaseUrl = process.env.DATABASE_URL;
   if (!databaseUrl) fail();
