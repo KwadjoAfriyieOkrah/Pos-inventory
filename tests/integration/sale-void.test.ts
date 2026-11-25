@@ -45,6 +45,7 @@ type LoadScope = typeof import("../../src/server/auth/scope")["loadScope"];
 type RequireBranch = typeof import("../../src/server/data/scope")["requireBranch"];
 type RequestVoid = typeof import("../../src/server/data/sale-void")["requestVoid"];
 type ApproveVoid = typeof import("../../src/server/data/sale-void")["approveVoid"];
+type ListPendingVoids = typeof import("../../src/server/data/sale-void")["listPendingVoids"];
 type VoidResult = import("../../src/server/data/sale-void").VoidResult;
 type ForbiddenErrorClass = typeof import("../../src/server/data/errors")["ForbiddenError"];
 
@@ -64,6 +65,7 @@ let loadScope: LoadScope;
 let requireBranch: RequireBranch;
 let requestVoid: RequestVoid;
 let approveVoid: ApproveVoid;
+let listPendingVoids: ListPendingVoids;
 let ForbiddenError: ForbiddenErrorClass;
 
 let branchCodeSequence = 0;
@@ -76,7 +78,7 @@ beforeAll(async () => {
   pool = client.pool;
   ({ loadScope } = await import("../../src/server/auth/scope"));
   ({ requireBranch } = await import("../../src/server/data/scope"));
-  ({ requestVoid, approveVoid } = await import("../../src/server/data/sale-void"));
+  ({ requestVoid, approveVoid, listPendingVoids } = await import("../../src/server/data/sale-void"));
   ({ ForbiddenError } = await import("../../src/server/data/errors"));
 });
 
@@ -778,5 +780,27 @@ describe("sale voids", () => {
     const reversals = await reversalRows(context.organizationId, batch.batchId);
     expect(reversals).toHaveLength(2);
     expect(reversals.reduce((sum, row) => sum + row.quantityDelta, 0)).toBe(7);
+  });
+
+  it("approved requests leave the pending list", async () => {
+    const context = await createContext();
+    const batch = await createBatch(context, 50);
+    const sale = await createSaleFixture(context, batch, {
+      totalPesewas: 5000,
+      quantity: 5,
+    });
+    const result = await requestVoid(
+      context.scope,
+      context.access,
+      sale.saleId,
+      "approval list reason",
+    );
+    const voidId = expectSuccess(result, "pending_approval");
+
+    const approval = await approveVoid(context.scope, context.access, voidId);
+    expect(approval.ok).toBe(true);
+
+    const pending = await listPendingVoids(context.scope, context.access);
+    expect(pending.some((entry) => entry.voidId === voidId)).toBe(false);
   });
 });

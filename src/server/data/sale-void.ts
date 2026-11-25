@@ -394,6 +394,7 @@ export async function listPendingVoids(
         isNull(saleVoids.decisionFor),
         eq(saleVoids.organizationId, access.organizationId),
         eq(saleVoids.branchId, access.branchId),
+        sql`not exists (select 1 from sale_voids d where d.decision_for = ${saleVoids.id})`,
       ),
     )
     .orderBy(asc(saleVoids.requestedAt))
