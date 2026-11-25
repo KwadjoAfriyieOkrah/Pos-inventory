@@ -147,6 +147,12 @@ export async function requestVoid(
   saleId: string,
   reason: string,
 ): Promise<VoidResult> {
+  access = await requireBranch(
+    scope,
+    access.branchId,
+    PERMISSIONS.saleCreate,
+  );
+
   try {
     return await db.transaction(async (tx) => {
       await tx.execute(sql`SET LOCAL lock_timeout = '2s'`);

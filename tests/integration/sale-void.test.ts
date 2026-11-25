@@ -405,6 +405,61 @@ describe("sale voids", () => {
     expect(denials).toHaveLength(1);
   });
 
+  it("requestVoid denies a scope without sale.create and records access.denied", async () => {
+    const context = await createContext({ permissions: [PERMISSIONS.saleCreate] });
+    const batch = await createBatch(context, 50);
+    const sale = await createSaleFixture(context, batch, {
+      totalPesewas: 5000,
+      quantity: 5,
+    });
+    const deniedScope: DataScope = {
+      userId: context.userId,
+      organizationId: context.organizationId,
+      branches: new Map([[context.branchId, new Set(["report.view_branch"])]]),
+    };
+    const access = await requireBranch(
+      context.scope,
+      context.branchId,
+      PERMISSIONS.saleCreate,
+    );
+
+    const error = await captureError(() =>
+      requestVoid(deniedScope, access, sale.saleId, "denial test reason"),
+    );
+
+    expect(error).toBeInstanceOf(ForbiddenError);
+    const denials = await db
+      .select({ id: auditEvents.id })
+      .from(auditEvents)
+      .where(
+        and(
+          eq(auditEvents.organizationId, context.organizationId),
+          eq(auditEvents.branchId, context.branchId),
+          eq(auditEvents.actorUserId, context.userId),
+          eq(auditEvents.action, "access.denied"),
+        ),
+      );
+    expect(denials.length).toBeGreaterThan(0);
+  });
+
+  it("requestVoid allows a cashier scope with sale.create and leaves today's sale pending", async () => {
+    const context = await createContext();
+    const batch = await createBatch(context, 50);
+    const sale = await createSaleFixture(context, batch, {
+      totalPesewas: 5000,
+      quantity: 5,
+    });
+
+    const result = await requestVoid(
+      context.scope,
+      context.access,
+      sale.saleId,
+      "allowance test reason",
+    );
+
+    expectSuccess(result, "pending_approval");
+  });
+
   it("auto-voids a 5000 sale with a 10000 limit and restores stock", async () => {
     const context = await createContext({ limitPesewas: 10000 });
     const batch = await createBatch(context, 100);
