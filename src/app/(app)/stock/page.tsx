@@ -15,11 +15,14 @@ type StockPageProps = {
 };
 
 async function SignedInStock({
-  requestedBranch,
+  searchParams,
 }: {
-  requestedBranch?: string;
+  searchParams: StockPageProps["searchParams"];
 }) {
   await connection();
+  const params = await searchParams;
+  const requestedBranch =
+    typeof params.branch === "string" ? params.branch : undefined;
 
   const session = await auth();
   if (!session?.user) {
@@ -76,14 +79,10 @@ async function SignedInStock({
 }
 
 export default async function StockPage({ searchParams }: StockPageProps) {
-  const params = await searchParams;
-  const requestedBranch =
-    typeof params.branch === "string" ? params.branch : undefined;
-
   return (
     <main className="w-full">
       <Suspense fallback={<p>Loading stock…</p>}>
-        <SignedInStock requestedBranch={requestedBranch} />
+        <SignedInStock searchParams={searchParams} />
       </Suspense>
     </main>
   );
