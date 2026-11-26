@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { formatPesewas } from "@/features/sales/format";
+import RequestVoidForm from "@/features/sales/RequestVoidForm";
 import type { SaleDetailData } from "@/server/data/sales-history";
 
 const createdAtFormatter = new Intl.DateTimeFormat("en-GH", {
@@ -9,10 +10,16 @@ const createdAtFormatter = new Intl.DateTimeFormat("en-GH", {
 });
 
 export function SaleDetail({
+  branchId,
+  canRequestVoid,
   detail,
+  saleId,
   backHref,
 }: {
+  branchId: string;
+  canRequestVoid: boolean;
   detail: SaleDetailData;
+  saleId: string;
   backHref: string;
 }) {
   const { sale, lines } = detail;
@@ -156,6 +163,8 @@ export function SaleDetail({
           </table>
         </div>
       </div>
+
+      {canRequestVoid ? <RequestVoidForm branchId={branchId} saleId={saleId} /> : null}
 
       <p className="mt-5 border-t border-stone-200 pt-4 text-xs text-stone-500">
         No reversals

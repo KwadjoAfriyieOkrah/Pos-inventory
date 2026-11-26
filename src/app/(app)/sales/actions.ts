@@ -9,8 +9,12 @@ import {
   SaleValidationError,
   type CompleteSaleResult,
 } from "@/server/data/sales";
+import { ForbiddenError } from "@/server/data/errors";
 import { PERMISSIONS } from "@/server/data/permissions";
+import type { AuthorizedBranch } from "@/server/data/scope";
 import { can, requireBranch } from "@/server/data/scope";
+import { requestVoid } from "@/server/data/sale-void";
+import { z } from "zod";
 
 export type SaleActionState = {
   error: string | null;
@@ -78,4 +82,54 @@ export async function completeSaleAction(
     }
     throw error;
   }
+}
+
+export type VoidRequestState = {
+  message: string | null;
+  tone: "success" | "error" | null;
+};
+
+const voidRequestSchema = z.object({
+  saleId: z.string().uuid(),
+  branchId: z.string().uuid(),
+  reason: z
+    .string()
+    .trim()
+    .min(5, "Give a reason of at least 5 characters.")
+    .max(200, "Keep the reason under 200 characters."),
+});
+
+export async function requestVoidAction(
+  _previousState: VoidRequestState,
+  formData: FormData,
+): Promise<VoidRequestState> {
+  const parsed = voidRequestSchema.safeParse({
+    saleId: formString(formData, "saleId"),
+    branchId: formString(formData, "branchId"),
+    reason: formString(formData, "reason"),
+  });
+  if (!parsed.success) {
+    return {
+      message: parsed.error.issues[0]?.message ?? "Check the sale and reason.",
+      tone: "error",
+    };
+  }
+
+  const scope = await getSignedInScope();
+  let access: AuthorizedBranch;
+  try {
+    access = await requireBranch(scope, parsed.data.branchId, PERMISSIONS.saleCreate);
+  } catch (error) {
+    if (error instanceof ForbiddenError) {
+      return { message: "You cannot request voids for this branch.", tone: "error" };
+    }
+    throw error;
+  }
+
+  const result = await requestVoid(scope, access, parsed.data.saleId, parsed.data.reason);
+  revalidatePath("/sales/history");
+  if (!result.ok) return { message: result.message, tone: "error" };
+  return result.status === "completed"
+    ? { message: "Voided. The stock has been returned.", tone: "success" }
+    : { message: "Request sent. The owner will approve it in Void approvals.", tone: "success" };
 }

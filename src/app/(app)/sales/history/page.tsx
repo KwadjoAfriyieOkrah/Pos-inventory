@@ -189,10 +189,13 @@ async function SignedInSalesHistory({
       selectedSaleId={selectedSaleId}
     >
       {selectedSaleId ? (
-        detail ? (
+        detail && selectedRow ? (
           <SaleDetail
             backHref={historyHref(filters)}
+            branchId={selectedRow.branchId}
+            canRequestVoid={can(scope, selectedRow.branchId, PERMISSIONS.saleCreate)}
             detail={detail}
+            saleId={selectedRow.saleId}
           />
         ) : (
           <div />
