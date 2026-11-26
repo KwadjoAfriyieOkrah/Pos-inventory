@@ -45,6 +45,7 @@ type LoadScope = typeof import("../../src/server/auth/scope")["loadScope"];
 type RequireBranch = typeof import("../../src/server/data/scope")["requireBranch"];
 type RequestVoid = typeof import("../../src/server/data/sale-void")["requestVoid"];
 type ApproveVoid = typeof import("../../src/server/data/sale-void")["approveVoid"];
+type RejectVoid = typeof import("../../src/server/data/sale-void")["rejectVoid"];
 type ListPendingVoids = typeof import("../../src/server/data/sale-void")["listPendingVoids"];
 type VoidResult = import("../../src/server/data/sale-void").VoidResult;
 type ForbiddenErrorClass = typeof import("../../src/server/data/errors")["ForbiddenError"];
@@ -65,6 +66,7 @@ let loadScope: LoadScope;
 let requireBranch: RequireBranch;
 let requestVoid: RequestVoid;
 let approveVoid: ApproveVoid;
+let rejectVoid: RejectVoid;
 let listPendingVoids: ListPendingVoids;
 let ForbiddenError: ForbiddenErrorClass;
 
@@ -78,7 +80,7 @@ beforeAll(async () => {
   pool = client.pool;
   ({ loadScope } = await import("../../src/server/auth/scope"));
   ({ requireBranch } = await import("../../src/server/data/scope"));
-  ({ requestVoid, approveVoid, listPendingVoids } = await import("../../src/server/data/sale-void"));
+  ({ requestVoid, approveVoid, rejectVoid, listPendingVoids } = await import("../../src/server/data/sale-void"));
   ({ ForbiddenError } = await import("../../src/server/data/errors"));
 });
 
@@ -802,5 +804,87 @@ describe("sale voids", () => {
 
     const pending = await listPendingVoids(context.scope, context.access);
     expect(pending.some((entry) => entry.voidId === voidId)).toBe(false);
+  });
+
+  it("reject leaves stock unchanged", async () => {
+    const context = await createContext();
+    const batch = await createBatch(context, 50);
+    const sale = await createSaleFixture(context, batch, {
+      totalPesewas: 5000,
+      quantity: 5,
+    });
+    const startQuantity = await batchQuantity(batch.batchId);
+    const voidId = expectSuccess(
+      await requestVoid(
+        context.scope,
+        context.access,
+        sale.saleId,
+        "rejection reason",
+      ),
+      "pending_approval",
+    );
+
+    const rejection = await rejectVoid(context.scope, context.access, voidId);
+    expect(rejection.ok).toBe(true);
+    if (!rejection.ok) throw new Error(rejection.message);
+    expect(rejection.status).toBe("rejected");
+    expect(await batchQuantity(batch.batchId)).toBe(startQuantity);
+
+    const pending = await listPendingVoids(context.scope, context.access);
+    expect(pending.some((entry) => entry.voidId === voidId)).toBe(false);
+  });
+
+  it("approve after reject fails", async () => {
+    const context = await createContext();
+    const batch = await createBatch(context, 50);
+    const sale = await createSaleFixture(context, batch, {
+      totalPesewas: 5000,
+      quantity: 5,
+    });
+    const voidId = expectSuccess(
+      await requestVoid(
+        context.scope,
+        context.access,
+        sale.saleId,
+        "approve after reject reason",
+      ),
+      "pending_approval",
+    );
+
+    const rejection = await rejectVoid(context.scope, context.access, voidId);
+    expect(rejection.ok).toBe(true);
+    if (!rejection.ok) throw new Error(rejection.message);
+
+    expectFailure(
+      await approveVoid(context.scope, context.access, voidId),
+      "This void is not waiting for approval.",
+    );
+  });
+
+  it("reject after approve fails", async () => {
+    const context = await createContext();
+    const batch = await createBatch(context, 50);
+    const sale = await createSaleFixture(context, batch, {
+      totalPesewas: 5000,
+      quantity: 5,
+    });
+    const voidId = expectSuccess(
+      await requestVoid(
+        context.scope,
+        context.access,
+        sale.saleId,
+        "reject after approve reason",
+      ),
+      "pending_approval",
+    );
+
+    const approval = await approveVoid(context.scope, context.access, voidId);
+    expect(approval.ok).toBe(true);
+    if (!approval.ok) throw new Error(approval.message);
+
+    expectFailure(
+      await rejectVoid(context.scope, context.access, voidId),
+      "This void is not waiting for approval.",
+    );
   });
 });

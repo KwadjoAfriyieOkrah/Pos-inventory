@@ -22,7 +22,7 @@ export type VoidResult =
   | {
       ok: true;
       voidId: string;
-      status: "completed" | "pending_approval";
+      status: "completed" | "pending_approval" | "rejected";
     }
   | { ok: false; message: string };
 
@@ -343,6 +343,105 @@ export async function approveVoid(
     });
 
     return { ok: true, voidId: createdDecision.id, status: "completed" };
+  });
+}
+
+export async function rejectVoid(
+  scope: DataScope,
+  access: AuthorizedBranch,
+  voidId: string,
+): Promise<VoidResult> {
+  access = await requireBranch(
+    scope,
+    access.branchId,
+    PERMISSIONS.saleVoid,
+  );
+
+  return db.transaction(async (tx) => {
+    await tx.execute(sql`SET LOCAL lock_timeout = '2s'`);
+
+    const [pendingVoid] = await tx
+      .select({
+        id: saleVoids.id,
+        saleId: saleVoids.saleId,
+        status: saleVoids.status,
+        reason: saleVoids.reason,
+        requestedBy: saleVoids.requestedBy,
+        requestedAt: saleVoids.requestedAt,
+        businessDate: saleVoids.businessDate,
+      })
+      .from(saleVoids)
+      .where(
+        and(
+          eq(saleVoids.id, voidId),
+          eq(saleVoids.status, "pending_approval"),
+          isNull(saleVoids.decisionFor),
+          eq(saleVoids.organizationId, access.organizationId),
+          eq(saleVoids.branchId, access.branchId),
+        ),
+      )
+      .limit(1);
+
+    if (!pendingVoid) {
+      return { ok: false, message: "This void is not waiting for approval." };
+    }
+
+    const [decisionRow] = await tx
+      .select({ id: saleVoids.id })
+      .from(saleVoids)
+      .where(
+        and(
+          eq(saleVoids.decisionFor, pendingVoid.id),
+          eq(saleVoids.organizationId, access.organizationId),
+          eq(saleVoids.branchId, access.branchId),
+        ),
+      )
+      .limit(1);
+
+    if (decisionRow) {
+      return { ok: false, message: "This void is not waiting for approval." };
+    }
+
+    let createdDecision: { id: string } | undefined;
+    try {
+      [createdDecision] = await tx
+        .insert(saleVoids)
+        .values({
+          organizationId: access.organizationId,
+          branchId: access.branchId,
+          saleId: pendingVoid.saleId,
+          status: "rejected",
+          decisionFor: pendingVoid.id,
+          reason: pendingVoid.reason,
+          requestedBy: pendingVoid.requestedBy,
+          requestedAt: pendingVoid.requestedAt,
+          // approved_by holds the decider for rejections; there is no decided_by column.
+          approvedBy: scope.userId,
+          decidedAt: new Date(),
+          businessDate: pendingVoid.businessDate,
+        })
+        .returning({ id: saleVoids.id });
+    } catch (error) {
+      const { code, constraint } = postgresFields(error);
+      if (code === "23505" && constraint === "sale_voids_decision_for_unique") {
+        return { ok: false, message: "This void is not waiting for approval." };
+      }
+      throw error;
+    }
+
+    if (!createdDecision) throw new Error("Sale void rejection was not created.");
+
+    await tx.insert(auditEvents).values({
+      organizationId: access.organizationId,
+      branchId: access.branchId,
+      actorUserId: scope.userId,
+      action: "sale.void_rejected",
+      entityType: "sale",
+      entityId: pendingVoid.saleId,
+      payload: { status: "rejected" },
+    });
+
+    return { ok: true, voidId: createdDecision.id, status: "rejected" };
   });
 }
 

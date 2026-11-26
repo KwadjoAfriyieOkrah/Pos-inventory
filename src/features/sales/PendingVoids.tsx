@@ -1,6 +1,9 @@
 import { formatPesewas } from "@/features/sales/format";
 import type { PendingVoid } from "@/server/data/sale-void";
-import { approveVoidAction } from "@/app/(app)/sales/voids/actions";
+import {
+  approveVoidAction,
+  rejectVoidAction,
+} from "@/app/(app)/sales/voids/actions";
 
 const requestedAtFormatter = new Intl.DateTimeFormat("en-GH", {
   dateStyle: "medium",
@@ -14,6 +17,9 @@ type PendingVoidsProps = {
 
 export function PendingVoids({ voids }: PendingVoidsProps) {
   const approveVoidFormAction = approveVoidAction as unknown as (
+    formData: FormData,
+  ) => Promise<void>;
+  const rejectVoidFormAction = rejectVoidAction as unknown as (
     formData: FormData,
   ) => Promise<void>;
 
@@ -46,6 +52,15 @@ export function PendingVoids({ voids }: PendingVoidsProps) {
                 className="min-h-11 rounded-xl bg-teal-800 px-4 text-sm font-semibold text-white hover:bg-teal-900"
               >
                 Approve
+              </button>
+            </form>
+            <form action={rejectVoidFormAction}>
+              <input type="hidden" name="voidId" value={voidRequest.voidId} />
+              <button
+                type="submit"
+                className="min-h-11 rounded-xl border border-stone-300 bg-white px-4 text-sm font-semibold text-stone-700 hover:bg-stone-100"
+              >
+                Reject
               </button>
             </form>
           </div>
