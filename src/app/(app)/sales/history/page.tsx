@@ -72,11 +72,12 @@ function historyHref(filters: NormalizedSalesHistoryFilters): string {
 }
 
 async function SignedInSalesHistory({
-  params,
+  searchParams,
 }: {
-  params: Awaited<SalesHistoryPageProps["searchParams"]>;
+  searchParams: SalesHistoryPageProps["searchParams"];
 }) {
   await connection();
+  const params = await searchParams;
 
   const session = await auth();
   if (!session?.user) {
@@ -204,12 +205,10 @@ async function SignedInSalesHistory({
 export default async function SalesHistoryPage({
   searchParams,
 }: SalesHistoryPageProps) {
-  const params = await searchParams;
-
   return (
     <main className="w-full">
       <Suspense fallback={<p>Loading sales history…</p>}>
-        <SignedInSalesHistory params={params} />
+        <SignedInSalesHistory searchParams={searchParams} />
       </Suspense>
     </main>
   );
